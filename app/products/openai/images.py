@@ -16,7 +16,7 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
-from app.platform.storage import image_files_dir
+from app.platform.storage import image_files_dir, save_media_bytes
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.model.spec import ModelSpec
@@ -186,8 +186,7 @@ def _save_image(raw: bytes, mime: str, file_id: str) -> str:
     img_dir = image_files_dir()
     ext = ".png" if "png" in mime else ".jpg"
     path = img_dir / f"{file_id}{ext}"
-    if not path.exists():
-        path.write_bytes(raw)
+    save_media_bytes(raw, path, media_type="image")
     return file_id
 
 

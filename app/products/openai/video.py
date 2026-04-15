@@ -22,7 +22,7 @@ from app.platform.config.snapshot import get_config
 from app.platform.errors import AppError, ErrorKind, RateLimitError, UpstreamError, ValidationError
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
-from app.platform.storage import video_files_dir
+from app.platform.storage import video_files_dir, save_media_bytes
 from app.control.account.enums import FeedbackKind
 from app.control.model import registry as model_registry
 from app.control.model.registry import resolve as resolve_model
@@ -554,9 +554,7 @@ async def _download_video_bytes(token: str, url: str) -> tuple[bytes, str]:
 def _save_video_bytes(raw: bytes, file_id: str) -> Path:
     out_dir = video_files_dir()
     path = out_dir / f"{file_id}.mp4"
-    if not path.exists():
-        path.write_bytes(raw)
-    return path
+    return save_media_bytes(raw, path, media_type="video")
 
 
 def _local_video_url(file_id: str) -> str:
