@@ -8,7 +8,6 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable
-from urllib.parse import urlparse
 
 import orjson
 
@@ -16,7 +15,7 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
-from app.platform.storage import image_files_dir, save_media_bytes
+from app.platform.storage import save_local_image
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.model.spec import ModelSpec
@@ -29,7 +28,6 @@ from app.dataplane.reverse.protocol.xai_chat import (
 )
 from app.dataplane.reverse.protocol.xai_assets import infer_content_type, resolve_asset_reference, resolve_download_url
 from app.dataplane.reverse.protocol.xai_image_edit import (
-    IMAGE_EDIT_GENERATION_COUNT,
     IMAGE_POST_MEDIA_TYPE,
     build_image_edit_payload,
     extract_model_response_file_attachments,
@@ -147,16 +145,6 @@ def _normalize_response_format(response_format: str) -> str:
     return fmt
 
 
-def _normalize_configured_image_format(value: str | None) -> str:
-    fmt = (value or "grok_url").strip().lower()
-    if fmt not in {"grok_url", "local_url", "grok_md", "local_md", "base64"}:
-        raise ValidationError(
-            "image_format must be one of [grok_url, local_url, grok_md, local_md, base64]",
-            param="features.image_format",
-        )
-    return fmt
-
-
 def _app_url() -> str:
     return get_config().get_str("app.app_url", "").rstrip("/")
 
@@ -167,27 +155,16 @@ def _local_image_url(file_id: str) -> str:
 
 
 def _extract_image_file_id(url: str) -> str:
-    parsed = urlparse(url)
-    parts = [part for part in parsed.path.split("/") if part]
-    if parsed.scheme == "https" and parsed.netloc == "assets.grok.com" and len(parts) >= 2:
-        last_stem = parts[-1].split(".", 1)[0].lower()
-        if last_stem == "content":
-            asset_id = parts[-2].strip()
-            if asset_id:
-                return asset_id
+    parts = [part for part in url.split("/") if part]
     for part in reversed(parts):
         stem = part.split(".", 1)[0]
-        if stem and stem.lower() not in {"image", "original", "thumbnail", "content"}:
+        if stem and stem not in {"image", "original", "thumbnail"}:
             return stem
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:32]
 
 
 def _save_image(raw: bytes, mime: str, file_id: str) -> str:
-    img_dir = image_files_dir()
-    ext = ".png" if "png" in mime else ".jpg"
-    path = img_dir / f"{file_id}{ext}"
-    save_media_bytes(raw, path, media_type="image")
-    return file_id
+    return save_local_image(raw, mime, file_id)
 
 
 async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
@@ -211,24 +188,7 @@ async def _resolve_image_output(
     blob_b64: str | None = None,
 ) -> _ImageOutput:
     fmt = _normalize_response_format(response_format)
-    if fmt == "b64_json":
-        mime = infer_content_type(url) or "image/jpeg"
-        if blob_b64 is not None:
-            try:
-                raw = base64.b64decode(blob_b64)
-            except (ValueError, TypeError, binascii.Error) as exc:
-                raise UpstreamError(f"Invalid upstream image blob: {exc}") from exc
-        else:
-            raw, mime = await _download_image_bytes(token, url)
-
-        b64 = blob_b64 or base64.b64encode(raw).decode()
-        data_uri = f"data:{mime};base64,{b64}"
-        return _ImageOutput(api_value=b64, markdown_value=f"![image]({data_uri})")
-
-    image_format = _normalize_configured_image_format(
-        get_config().get_str("features.image_format", "grok_url")
-    )
-    if image_format in {"grok_url", "grok_md"}:
+    if fmt == "url" and not _app_url():
         return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
 
     mime = infer_content_type(url) or "image/jpeg"
@@ -240,12 +200,17 @@ async def _resolve_image_output(
     else:
         raw, mime = await _download_image_bytes(token, url)
 
-    if image_format == "base64":
+    if fmt == "b64_json":
         b64 = blob_b64 or base64.b64encode(raw).decode()
         data_uri = f"data:{mime};base64,{b64}"
-        return _ImageOutput(api_value=data_uri, markdown_value=f"![image]({data_uri})")
+        return _ImageOutput(api_value=b64, markdown_value=f"![image]({data_uri})")
 
-    file_id = _save_image(raw, mime, _extract_image_file_id(url))
+    file_id = await asyncio.to_thread(
+        _save_image,
+        raw,
+        mime,
+        _extract_image_file_id(url),
+    )
     local_url = _local_image_url(file_id)
     return _ImageOutput(api_value=local_url, markdown_value=f"![image]({local_url})")
 
@@ -305,10 +270,9 @@ async def generate(
             chat_format     = chat_format,
         )
 
-    acct = await _acct_dir.reserve(
-        pool_candidates = spec.pool_candidates(),
-        mode_id         = int(spec.mode_id),
-        now_s_override  = now_s(),
+    acct = await _acct_dir.reserve_any(
+        spec.pool_candidates(),
+        now_s_override=now_s(),
     )
     if acct is None:
         raise RateLimitError("No available accounts for image generation")
@@ -316,6 +280,7 @@ async def generate(
     token       = acct.token
     response_id = make_response_id()
     enable_pro  = model in _PRO_IMAGE_MODELS
+    _ws_mode_id = int(spec.mode_id)
 
     if stream:
         async def _sse_stream() -> AsyncGenerator[str, None]:
@@ -383,12 +348,12 @@ async def generate(
                 raise
             finally:
                 await _acct_dir.release(acct)
-                kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-                await _acct_dir.feedback(token, kind, int(spec.mode_id))
-                if success:
-                    asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
-                else:
-                    asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+                # WS image gen has its own upstream rate limiting — skip quota tracking.
+                # Still propagate auth failures so bad accounts get marked expired.
+                if not success and fail_exc is not None:
+                    kind = _feedback_kind(fail_exc)
+                    if kind in (FeedbackKind.UNAUTHORIZED, FeedbackKind.FORBIDDEN):
+                        await _acct_dir.feedback(token, kind, _ws_mode_id)
 
         return _sse_stream()
 
@@ -450,12 +415,11 @@ async def generate(
         raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
-        await _acct_dir.feedback(token, kind, int(spec.mode_id))
-        if success:
-            asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
-        else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+        # WS image gen has its own upstream rate limiting — skip quota tracking.
+        if not success and fail_exc is not None:
+            kind = _feedback_kind(fail_exc)
+            if kind in (FeedbackKind.UNAUTHORIZED, FeedbackKind.FORBIDDEN):
+                await _acct_dir.feedback(token, kind, _ws_mode_id)
 
     if chat_format:
         content = "\n\n".join(image.markdown_value for image in finals)

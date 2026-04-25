@@ -1,83 +1,81 @@
-import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.platform.storage.media_cache import save_media_bytes
+from app.platform.storage.media_cache import LocalMediaCacheStore
 
 
 class _StubConfig:
-    def __init__(
-        self,
-        *,
-        media_max_mb: float = 0.0,
-        image_max_mb: float = 0.0,
-        video_max_mb: float = 0.0,
-    ) -> None:
-        self._floats = {
-            "storage.media_max_mb": media_max_mb,
-            "storage.image_max_mb": image_max_mb,
-            "storage.video_max_mb": video_max_mb,
+    def __init__(self, *, image_max_mb: int = 0, video_max_mb: int = 0) -> None:
+        self._ints = {
+            "cache.local.image_max_mb": image_max_mb,
+            "cache.local.video_max_mb": video_max_mb,
         }
 
-    def get_float(self, key: str, default: float = 0.0) -> float:
-        return self._floats.get(key, default)
+    def get_int(self, key: str, default: int = 0) -> int:
+        return self._ints.get(key, default)
 
 
 class MediaCacheLimitTests(unittest.TestCase):
-    def test_save_media_bytes_prunes_oldest_file_when_type_limit_exceeded(self) -> None:
+    def test_save_image_prunes_oldest_file_when_type_limit_exceeded(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            image_dir = Path(tmpdir) / "images"
-            video_dir = Path(tmpdir) / "videos"
+            root = Path(tmpdir)
+            image_dir = root / "images"
+            video_dir = root / "videos"
             image_dir.mkdir()
             video_dir.mkdir()
 
-            old_path = image_dir / "old.png"
-            old_path.write_bytes(b"a" * 80)
-            old_mtime = time.time() - 60
-            os.utime(old_path, (old_mtime, old_mtime))
+            store = LocalMediaCacheStore(
+                config_provider=lambda: _StubConfig(image_max_mb=1)
+            )
+            with patch("app.platform.storage.media_cache.image_files_dir", return_value=image_dir):
+                with patch("app.platform.storage.media_cache.video_files_dir", return_value=video_dir):
+                    with patch(
+                        "app.platform.storage.media_cache.local_media_cache_db_path",
+                        return_value=root / "cache.db",
+                    ):
+                        with patch(
+                            "app.platform.storage.media_cache.local_media_lock_path",
+                            return_value=root / "cache.lock",
+                        ):
+                            store.save_image(b"a" * 800_000, "image/png", "old")
+                            file_id = store.save_image(b"b" * 400_000, "image/png", "new")
 
-            config = _StubConfig(image_max_mb=100 / (1024 * 1024))
-            with patch("app.platform.storage.media_cache.get_config", return_value=config):
-                with patch("app.platform.storage.media_cache.image_files_dir", return_value=image_dir):
-                    with patch("app.platform.storage.media_cache.video_files_dir", return_value=video_dir):
-                        new_path = save_media_bytes(
-                            b"b" * 40,
-                            image_dir / "new.png",
-                            media_type="image",
-                        )
+            self.assertEqual(file_id, "new")
+            self.assertTrue((image_dir / "new.png").exists())
+            self.assertFalse((image_dir / "old.png").exists())
 
-            self.assertTrue(new_path.exists())
-            self.assertFalse(old_path.exists())
-
-        self.assertEqual(new_path.name, "new.png")
-
-    def test_save_media_bytes_prunes_across_media_types_when_total_limit_exceeded(self) -> None:
+    def test_save_video_prunes_oldest_video_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            image_dir = Path(tmpdir) / "images"
-            video_dir = Path(tmpdir) / "videos"
+            root = Path(tmpdir)
+            image_dir = root / "images"
+            video_dir = root / "videos"
             image_dir.mkdir()
             video_dir.mkdir()
 
-            old_image = image_dir / "old.png"
-            old_image.write_bytes(b"a" * 80)
-            old_mtime = time.time() - 60
-            os.utime(old_image, (old_mtime, old_mtime))
+            image_path = image_dir / "keep.png"
+            image_path.write_bytes(b"i" * 800_000)
 
-            config = _StubConfig(media_max_mb=100 / (1024 * 1024))
-            with patch("app.platform.storage.media_cache.get_config", return_value=config):
-                with patch("app.platform.storage.media_cache.image_files_dir", return_value=image_dir):
-                    with patch("app.platform.storage.media_cache.video_files_dir", return_value=video_dir):
-                        new_video = save_media_bytes(
-                            b"b" * 40,
-                            video_dir / "new.mp4",
-                            media_type="video",
-                        )
+            store = LocalMediaCacheStore(
+                config_provider=lambda: _StubConfig(video_max_mb=1)
+            )
+            with patch("app.platform.storage.media_cache.image_files_dir", return_value=image_dir):
+                with patch("app.platform.storage.media_cache.video_files_dir", return_value=video_dir):
+                    with patch(
+                        "app.platform.storage.media_cache.local_media_cache_db_path",
+                        return_value=root / "cache.db",
+                    ):
+                        with patch(
+                            "app.platform.storage.media_cache.local_media_lock_path",
+                            return_value=root / "cache.lock",
+                        ):
+                            store.save_video(b"a" * 800_000, "old")
+                            new_video = store.save_video(b"b" * 400_000, "new")
 
             self.assertTrue(new_video.exists())
-            self.assertFalse(old_image.exists())
+            self.assertFalse((video_dir / "old.mp4").exists())
+            self.assertTrue(image_path.exists())
 
 
 if __name__ == "__main__":

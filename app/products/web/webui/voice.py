@@ -18,12 +18,15 @@ class VoiceTokenResponse(BaseModel):
     room_name: str = ""
 
 
-@router.get("/voice/token", response_model=VoiceTokenResponse)
-async def voice_token(
-    voice: str = "ara",
-    personality: str = "assistant",
-    speed: float = 1.0,
-):
+class VoiceTokenRequest(BaseModel):
+    voice: str = "ara"
+    personality: str = "assistant"
+    speed: float = 1.0
+    instruction: str = ""
+
+
+@router.post("/voice/token", response_model=VoiceTokenResponse)
+async def voice_token(request: VoiceTokenRequest):
     """Acquire a LiveKit voice session token."""
     from app.dataplane.account import _directory as _acct_dir
     if _acct_dir is None:
@@ -40,7 +43,13 @@ async def voice_token(
     token = acct.token
     try:
         from app.dataplane.reverse.transport.livekit import fetch_livekit_token
-        data = await fetch_livekit_token(token, voice=voice, personality=personality, speed=speed)
+        data = await fetch_livekit_token(
+            token,
+            voice=request.voice,
+            personality=request.personality,
+            speed=request.speed,
+            custom_instruction=request.instruction.strip(),
+        )
         lk_token = data.get("token")
         if not lk_token:
             raise UpstreamError("Upstream returned no voice token")

@@ -20,6 +20,7 @@ _MODE_NAMES: dict[int, str] = {
     1: "fast",
     2: "expert",
     3: "heavy",
+    4: "grok-420-computer-use-sa",
 }
 
 # Default window durations used as fallback when API call fails.
@@ -28,6 +29,7 @@ _DEFAULT_WINDOW_SECS: dict[int, int] = {
     1: 72_000,  # fast   — 20 h (basic)
     2: 36_000,  # expert — 10 h (basic)
     3: 7_200,  # heavy  — 2 h  (heavy-pool only)
+    4: 7_200,  # grok_4_3 — 2 h  (super/heavy only)
 }
 
 
@@ -165,13 +167,13 @@ async def fetch_all_quotas(
 ) -> dict[int, object] | None:
     """Fetch quota windows for the requested modes concurrently.
 
-    ``mode_ids`` defaults to ``(0, 1, 2, 3)``. Returns ``{mode_id: QuotaWindow}``
+    ``mode_ids`` defaults to ``(0, 1, 2, 3, 4)``. Returns ``{mode_id: QuotaWindow}``
     for every mode that responded successfully, or ``None`` if every requested
     mode failed.
     """
     import asyncio
 
-    requested = mode_ids or (0, 1, 2, 3)
+    requested = mode_ids or (0, 1, 2, 3, 4)
     results = await asyncio.gather(
         *(_fetch_one(token, mode_id) for mode_id in requested), return_exceptions=True
     )

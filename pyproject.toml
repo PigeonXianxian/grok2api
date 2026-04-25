@@ -1,6 +1,6 @@
 [project]
 name = "grok2api"
-version = "2.0.4.rc1"
+version = "2.0.4.rc3"
 description = "Grok2API rebuilt with FastAPI, fully aligned with the latest web call format. Supports streaming and non-streaming chat, image generation/editing, deep thinking, token pool concurrency, and automatic load balancing."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -19,7 +19,7 @@ dependencies = [
     "orjson>=3.11.4",
     "pydantic>=2.12.3",
     "python-dotenv>=1.1.1",
-    "python-multipart>=0.0.21",
+    "python-multipart>=0.0.26",
     "redis>=6.4.0",
     "sqlalchemy>=2.0.46",
     "starlette>=0.48.0",

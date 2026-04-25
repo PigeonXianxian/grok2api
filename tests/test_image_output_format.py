@@ -31,12 +31,18 @@ class ImageOutputFormatTests(unittest.TestCase):
                 image_format="local_url",
                 app_url="https://app.example.com",
             )
+
+            def _save_local_image(raw: bytes, mime: str, file_id: str) -> str:
+                suffix = ".png" if "png" in mime else ".jpg"
+                (Path(tmpdir) / f"{file_id}{suffix}").write_bytes(raw)
+                return file_id
+
             with patch.object(images, "get_config", return_value=config):
-                with patch.object(images, "image_files_dir", return_value=Path(tmpdir)):
+                with patch.object(images, "save_local_image", side_effect=_save_local_image):
                     result = asyncio.run(
                         images._resolve_image_output(
                             token="unused",
-                            url=f"https://assets.grok.com/users/user-1/{asset_id}/content.png",
+                            url=f"https://assets.grok.com/users/user-1/{asset_id}.png",
                             response_format="url",
                             blob_b64=blob_b64,
                         )
@@ -56,7 +62,7 @@ class ImageOutputFormatTests(unittest.TestCase):
     def test_resolve_image_output_keeps_upstream_url_when_configured(self) -> None:
         config = _StubConfig(
             image_format="grok_url",
-            app_url="https://app.example.com",
+            app_url="",
         )
         with patch.object(images, "get_config", return_value=config):
             result = asyncio.run(

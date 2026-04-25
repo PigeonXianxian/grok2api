@@ -52,6 +52,7 @@ async def run_startup_migrations(
     """Run all first-boot migrations.  Safe to call on every startup."""
     await _migrate_config(config_backend)
     await _migrate_accounts(account_repo)
+    await _backfill_grok_4_3_quota(account_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +176,8 @@ def _record_to_patch(r) -> "AccountPatch":
         quota_auto=qs.auto.to_dict()   if qs.auto   else None,
         quota_fast=qs.fast.to_dict()   if qs.fast   else None,
         quota_expert=qs.expert.to_dict() if qs.expert else None,
-        quota_heavy=qs.heavy.to_dict() if qs.heavy  else None,
+        quota_heavy=qs.heavy.to_dict()    if qs.heavy    else None,
+        quota_grok_4_3=qs.grok_4_3.to_dict() if qs.grok_4_3 else None,
         # Usage counts — target starts at 0, so actual value == delta.
         usage_use_delta=r.usage_use_count   or None,
         usage_fail_delta=r.usage_fail_count or None,
@@ -188,6 +190,44 @@ def _record_to_patch(r) -> "AccountPatch":
         state_reason=r.state_reason,
         ext_merge=r.ext or None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Backfill quota_grok_4_3 for super/heavy accounts imported before the field existed.
+# ---------------------------------------------------------------------------
+
+async def _backfill_grok_4_3_quota(repo: "AccountRepository") -> None:
+    from app.control.account.commands import AccountPatch, ListAccountsQuery
+    from app.control.account.quota_defaults import default_quota_window
+
+    patches: list[AccountPatch] = []
+    page = 1
+    while True:
+        result = await repo.list_accounts(
+            ListAccountsQuery(page=page, page_size=_BATCH, include_deleted=False)
+        )
+        for record in result.items:
+            if record.pool not in ("super", "heavy"):
+                continue
+            if record.quota_set().grok_4_3 is not None:
+                continue
+            window = default_quota_window(record.pool, 4)
+            if window is None:
+                continue
+            patches.append(AccountPatch(token=record.token, quota_grok_4_3=window.to_dict()))
+        if page >= result.total_pages:
+            break
+        page += 1
+
+    if not patches:
+        return
+
+    total = 0
+    for i in range(0, len(patches), _BATCH):
+        batch = patches[i : i + _BATCH]
+        res = await repo.patch_accounts(batch)
+        total += res.patched
+    logger.info("account: backfilled quota_grok_4_3 for {} super/heavy accounts", total)
 
 
 # ---------------------------------------------------------------------------

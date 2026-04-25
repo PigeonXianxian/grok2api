@@ -150,10 +150,14 @@ button{cursor:pointer}
 .webui-chatkit-shell{width:min(100%,1120px);margin:0 auto;display:grid;grid-template-columns:minmax(0,1fr);gap:18px;min-height:calc(100vh - 106px)}
 .webui-chatkit-stage{display:grid;gap:18px;align-content:center}
 .webui-chatkit-toolbar{
-  width:min(100%,240px);margin:0 auto;min-width:0
+  width:min(100%,520px);margin:0 auto;min-width:0
 }
 .webui-chatkit-toolbar-controls{
-  display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:10px;min-width:0
+  display:grid;grid-template-columns:repeat(4,1fr);align-items:start;gap:10px;min-width:0
+}
+@media (max-width: 600px){
+  .webui-chatkit-toolbar{width:min(100%,100%)}
+  .webui-chatkit-toolbar-controls{grid-template-columns:repeat(2,1fr)}
 }
 .webui-chatkit-pill{
   width:100%;min-width:0;padding:0;border-radius:0;display:grid;

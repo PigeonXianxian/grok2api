@@ -91,6 +91,7 @@
       "pageTitle": "Grok2API - ChatKit",
       "voiceLabel": "Voice",
       "personalityLabel": "Personality",
+      "instructionLabel": "Prompt",
       "speedLabel": "Speed",
       "start": "Start",
       "pause": "Pause",
@@ -160,6 +161,7 @@
     "statInvalid": "Abnormal",
     "statDisabled": "Disabled",
     "statCalls": "Total Calls",
+    "statSuccessTotal": "Successful Calls",
     "statAuto": "Auto Balance",
     "statFast": "Fast Balance",
     "statExpert": "Expert Balance",
@@ -283,7 +285,8 @@
       "auto": "Auto",
       "fast": "Fast",
       "expert": "Expert",
-      "heavy": "Heavy"
+      "heavy": "Heavy",
+      "grok_4_3": "Grok 4.3 Beta"
     },
     "status": {
       "active": "Active",
@@ -322,6 +325,7 @@
         "features": "Features",
         "schedule": "Scheduling",
         "proxy": "Networking",
+        "cache": "Cache Storage",
         "image": "Image Pipeline"
       },
       "groups": {
@@ -329,6 +333,7 @@
         "features": "Core Features",
         "mediaFormat": "Media Output",
         "refreshSchedule": "Quota Refresh",
+        "selection": "Selection Concurrency",
         "batchConcurrency": "Batch Concurrency",
         "egressProxy": "Egress Proxy",
         "clearance": "Cloudflare Clearance",
@@ -336,7 +341,7 @@
         "timeouts": "Request Timeouts",
         "imageProtocol": "NSFW and Image Streaming",
         "logging": "Logging",
-        "storage": "Local Storage"
+        "localMediaCache": "Local Media Cache"
       },
       "options": {
         "imageFormat": {
@@ -400,6 +405,10 @@
           "label": "Default Reasoning Output",
           "desc": "Default value applied when the request does not explicitly provide the thinking parameter. When enabled, reasoning steps are returned in reasoning_content."
         },
+        "autoChatModeFallback": {
+          "label": "AUTO Chat Mode Fallback",
+          "desc": "When an AUTO chat model has no available auto quota, automatically try the fast and expert chat quota windows."
+        },
         "thinkingSummary": {
           "label": "Condensed Reasoning",
           "desc": "When enabled, reasoning steps are condensed into a structured summary. When disabled, the full raw reasoning stream is output, with multi-agent collaboration details and tool call traces."
@@ -411,6 +420,10 @@
         "enableNsfw": {
           "label": "Allow NSFW Generation",
           "desc": "Permits the image generation endpoint to bypass NSFW content filtering."
+        },
+        "showSearchSources": {
+          "label": "Append Sources to Content",
+          "desc": "Search sources are always output in the search_sources field. This option controls whether to also append a ## Sources section to the response content (for backward compatibility with text-parsing clients)."
         },
         "customInstruction": {
           "label": "Global Supplemental Instruction",
@@ -424,25 +437,42 @@
           "label": "Video Output Format",
           "desc": "local_* modes download video assets to the server and deliver them through the local proxy. Configure the APP Base URL first and account for outbound bandwidth usage."
         },
+        "refreshEnabled": {
+          "label": "Enable Quota Refresh",
+          "desc": "When enabled, the system automatically switches to quota refresh mode. When disabled, it automatically switches to auto-retry mode.",
+          "help": "On: quota refresh mode. The scheduler periodically syncs real quota, and selection uses scoring.\nOff: auto-retry mode. No upstream probing, uniform random selection, and auto-swap on errors for up to 5 retries.\nRecommendation: turn this off for >10k accounts to avoid self-triggering upstream 429s."
+        },
+        "maxInflight": {
+          "label": "Max Inflight per Account",
+          "desc": "Maximum concurrent in-flight requests per account. Accounts at this limit are skipped by the selector (shared by both modes)."
+        },
         "basicInterval": {
-          "label": "Basic Refresh Interval (s)",
-          "desc": "Scheduled quota refresh interval for the basic pool. Align this with the quota window when possible (default 36000 s / 10 h)."
+          "label": "Basic Cycle (s)",
+          "desc": "Shared cycle for the basic pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 36000s."
         },
         "superInterval": {
-          "label": "Super Refresh Interval (s)",
-          "desc": "Scheduled quota refresh interval for the super pool. Align this with the quota window when possible (default 7200 s / 2 h)."
+          "label": "Super Cycle (s)",
+          "desc": "Shared cycle for the super pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 7200s."
         },
         "heavyInterval": {
-          "label": "Heavy Refresh Interval (s)",
-          "desc": "Scheduled quota refresh interval for the heavy pool. Align this with the quota window when possible (default 7200 s / 2 h)."
+          "label": "Heavy Cycle (s)",
+          "desc": "Shared cycle for the heavy pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 7200s."
         },
         "usageConcurrency": {
           "label": "Refresh Concurrency",
           "desc": "Maximum number of parallel usage calls allowed during quota refresh."
         },
         "onDemandMinInterval": {
-          "label": "Minimum On-Demand Refresh Interval (s)",
+          "label": "On-Demand Refresh Interval (s)",
           "desc": "Throttle window for request-triggered refreshes such as 429 handling. Repeated triggers within the interval are coalesced into a single refresh."
+        },
+        "imageCacheMaxMb": {
+          "label": "Image Cache Limit (MB)",
+          "desc": "0 disables the limit. Applies only to locally proxied media files. When the limit is exceeded, the oldest files are removed until usage falls back to 60% of the limit."
+        },
+        "videoCacheMaxMb": {
+          "label": "Video Cache Limit (MB)",
+          "desc": "0 disables the limit. Applies only to locally proxied media files. When the limit is exceeded, the oldest files are removed until usage falls back to 60% of the limit."
         },
         "nsfwConcurrency": {
           "label": "NSFW Enablement Concurrency",
@@ -579,18 +609,6 @@
         "logMaxFiles": {
           "label": "Log Retention (days)",
           "desc": "Maximum number of daily log files to keep during rotation. Default: 7."
-        },
-        "mediaCacheMaxMb": {
-          "label": "Total Media Cache Limit (MB)",
-          "desc": "Shared size limit for local image and video cache, in MB. Set to 0 or a negative value to disable the limit."
-        },
-        "imageCacheMaxMb": {
-          "label": "Image Cache Limit (MB)",
-          "desc": "Dedicated size limit for local image cache, in MB. Set to 0 or a negative value to disable the limit."
-        },
-        "videoCacheMaxMb": {
-          "label": "Video Cache Limit (MB)",
-          "desc": "Dedicated size limit for local video cache, in MB. Set to 0 or a negative value to disable the limit."
         }
       }
     }
@@ -598,12 +616,14 @@
   "cache": {
     "pageTitle": "Grok2API - Cache Management",
     "pageHeading": "Cache Management",
-    "pageSubtitle": "View and manage local cache files and online account assets.",
+    "pageSubtitle": "View and manage local cache files, storage limits, and online account assets.",
     "sectionOverview": "Overview",
     "statImageCount": "Image Cache Files",
     "statImageSize": "Image Cache Size",
     "statVideoCount": "Video Cache Files",
     "statVideoSize": "Video Cache Size",
+    "usageSummaryUnlimited": "Used {used} · Unlimited",
+    "usageSummaryLimited": "Used {used} / {limit} · {percent}",
     "sectionDetails": "Details",
     "tabLocal": "Local Cache",
     "tabLocalImage": "Local Images",

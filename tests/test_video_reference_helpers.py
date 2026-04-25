@@ -1,78 +1,66 @@
+import asyncio
 import unittest
 
 from app.platform.errors import ValidationError
-from app.products.openai import video
+from app.products.openai import router, video
+
+
+def _message_with_references(count: int) -> list[dict]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "生成一个参考图视频"},
+                *[
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"https://example.com/ref-{idx}.png"},
+                    }
+                    for idx in range(count)
+                ],
+            ],
+        }
+    ]
 
 
 class VideoReferenceHelperTests(unittest.TestCase):
-    def test_replace_reference_placeholders_supports_cn_and_en_aliases(self) -> None:
-        prompt = "先展示@图1里的角色，再切到@image2的场景，最后回到@img1"
-        replaced = video._replace_reference_placeholders(
-            prompt,
-            ["asset_one", "asset_two"],
-        )
-        self.assertEqual(
-            replaced,
-            "先展示@asset_one里的角色，再切到@asset_two的场景，最后回到@asset_one",
+    def test_chat_video_prompt_allows_five_references(self) -> None:
+        prompt, refs = video._extract_video_prompt_and_reference(
+            _message_with_references(5)
         )
 
-    def test_replace_reference_placeholders_rejects_missing_index(self) -> None:
-        with self.assertRaises(ValidationError):
-            video._replace_reference_placeholders("参考@图2", ["asset_one"])
-
-    def test_extract_video_prompt_and_references_collects_all_images(self) -> None:
-        prompt, refs = video._extract_video_prompt_and_references(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "第一段提示"},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/ref-1.png"}},
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "最终提示词"},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/ref-2.png"}},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/ref-3.png"}},
-                    ],
-                },
-            ]
-        )
-
-        self.assertEqual(prompt, "最终提示词")
+        self.assertEqual(prompt, "生成一个参考图视频")
         self.assertEqual(
             refs,
             [
-                {"image_url": "https://example.com/ref-1.png"},
-                {"image_url": "https://example.com/ref-2.png"},
-                {"image_url": "https://example.com/ref-3.png"},
+                {"image_url": f"https://example.com/ref-{idx}.png"}
+                for idx in range(5)
             ],
         )
 
-    def test_video_create_payload_includes_multi_reference_fields(self) -> None:
-        payload = video._video_create_payload(
-            prompt="test prompt",
-            parent_post_id="post_123",
-            aspect_ratio="16:9",
-            resolution_name="720p",
-            video_length=10,
-            preset="normal",
-            image_references=["https://assets.grok.com/users/u/ref-1/content"],
-            file_attachments=["asset_ref_1"],
-        )
+    def test_chat_video_prompt_rejects_more_than_five_references(self) -> None:
+        with self.assertRaises(ValidationError):
+            video._extract_video_prompt_and_reference(_message_with_references(6))
 
-        config = payload["responseMetadata"]["modelConfigOverride"]["modelMap"]["videoGenModelConfig"]
-        self.assertEqual(config["imageReferences"], ["https://assets.grok.com/users/u/ref-1/content"])
-        self.assertTrue(config["isReferenceToVideo"])
-        self.assertEqual(payload["fileAttachments"], ["asset_ref_1"])
+    def test_prepare_video_references_rejects_more_than_five_references(self) -> None:
+        refs = [{"image_url": f"https://example.com/ref-{idx}.png"} for idx in range(6)]
 
-    def test_extract_asset_id_from_content_url(self) -> None:
-        asset_id = video._extract_asset_id_from_content_url(
-            "https://assets.grok.com/users/user-123/asset-456/content"
-        )
-        self.assertEqual(asset_id, "asset-456")
+        async def _run() -> None:
+            await video._prepare_video_references("token", refs)
+
+        with self.assertRaises(ValidationError):
+            asyncio.run(_run())
+
+    def test_videos_create_rejects_more_than_five_multipart_references(self) -> None:
+        async def _run() -> None:
+            await router.videos_create(
+                model="grok-imagine-video",
+                prompt="生成一个参考图视频",
+                input_reference=[object() for _ in range(6)],  # type: ignore[list-item]
+            )
+
+        with self.assertRaises(ValidationError):
+            asyncio.run(_run())
 
 
 if __name__ == "__main__":

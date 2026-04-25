@@ -39,8 +39,16 @@ class AccountRefreshScheduler:
         self._tasks:  list[asyncio.Task] = []
         self._stop    = asyncio.Event()
 
+    def bind_service(self, refresh_service: AccountRefreshService) -> None:
+        """Update the refresh service used by the singleton scheduler."""
+        self._service = refresh_service
+
+    def is_running(self) -> bool:
+        """Return True while any pool refresh loop is still active."""
+        return any(not task.done() for task in self._tasks)
+
     def start(self) -> None:
-        if self._tasks and not all(t.done() for t in self._tasks):
+        if self.is_running():
             return
         self._stop.clear()
         self._tasks = [
@@ -54,11 +62,14 @@ class AccountRefreshScheduler:
         )
 
     def stop(self) -> None:
+        was_running = self.is_running()
         self._stop.set()
         for t in self._tasks:
             if not t.done():
                 t.cancel()
-        logger.info("account refresh scheduler stopped")
+        self._tasks = []
+        if was_running:
+            logger.info("account refresh scheduler stopped")
 
     async def _loop(self, pool: str) -> None:
         while not self._stop.is_set():
@@ -102,6 +113,8 @@ def get_account_refresh_scheduler(
     global _scheduler
     if _scheduler is None:
         _scheduler = AccountRefreshScheduler(refresh_service)
+    else:
+        _scheduler.bind_service(refresh_service)
     return _scheduler
 
 
