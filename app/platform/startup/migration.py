@@ -2,9 +2,10 @@
 
 Config migration
 ----------------
-local   : seeds ``${DATA_DIR}/config.toml`` from ``config.defaults.toml`` if
+local   : default; seeds ``${DATA_DIR}/config.toml`` from ``config.defaults.toml`` if
           the file does not exist yet — gives users an editable copy on first run.
-redis / sql : if the backend is empty (version == 0) AND
+redis / sql : only when CONFIG_STORAGE is explicitly set to a remote backend.
+          If the backend is empty (version == 0) AND
           ``${DATA_DIR}/config.toml`` exists, migrates the user overrides into
           the DB backend. If it does not exist either, nothing is written
           (defaults are always loaded from ``config.defaults.toml`` at runtime).

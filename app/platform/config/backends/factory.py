@@ -1,4 +1,4 @@
-"""Config backend factory — follows ACCOUNT_STORAGE automatically."""
+"""Config backend factory."""
 
 import os
 from pathlib import Path
@@ -8,19 +8,24 @@ from .base import ConfigBackend
 
 
 def get_config_backend_name() -> str:
-    """Return the active config backend name (mirrors ACCOUNT_STORAGE)."""
-    return os.getenv("ACCOUNT_STORAGE", "local").strip().lower()
+    """Return the active config backend name.
+
+    Runtime configuration is local by default even when account data is stored
+    in Redis or SQL.  Set CONFIG_STORAGE explicitly to opt into a remote config
+    backend.
+    """
+    return os.getenv("CONFIG_STORAGE", "local").strip().lower()
 
 
 def create_config_backend() -> ConfigBackend:
-    """Instantiate the config backend that matches the account storage backend.
+    """Instantiate the configured runtime config backend.
 
-    ``ACCOUNT_STORAGE=local``       → TOML file (``${DATA_DIR}/config.toml``)
-    ``ACCOUNT_STORAGE=redis``       → Redis  (ACCOUNT_REDIS_URL)
-    ``ACCOUNT_STORAGE=mysql``       → MySQL  (ACCOUNT_MYSQL_URL)
-    ``ACCOUNT_STORAGE=postgresql``  → PostgreSQL (ACCOUNT_POSTGRESQL_URL)
+    ``CONFIG_STORAGE=local``       → TOML file (``${DATA_DIR}/config.toml``)
+    ``CONFIG_STORAGE=redis``       → Redis  (ACCOUNT_REDIS_URL)
+    ``CONFIG_STORAGE=mysql``       → MySQL  (ACCOUNT_MYSQL_URL)
+    ``CONFIG_STORAGE=postgresql``  → PostgreSQL (ACCOUNT_POSTGRESQL_URL)
 
-    No extra env vars needed — reuses the same connection settings as accounts.
+    Remote config backends reuse the same connection settings as accounts.
     """
     backend = get_config_backend_name()
 
@@ -31,7 +36,7 @@ def create_config_backend() -> ConfigBackend:
     if backend in ("mysql", "postgresql"):
         return _make_sql(backend)
 
-    raise ValueError(f"Unknown account storage backend: {backend!r}")
+    raise ValueError(f"Unknown config storage backend: {backend!r}")
 
 
 def _make_toml() -> ConfigBackend:
