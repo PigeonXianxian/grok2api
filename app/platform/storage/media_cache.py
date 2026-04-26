@@ -88,6 +88,57 @@ class LocalMediaCacheStore:
             self._enforce_limit_locked(conn, media_type)
             conn.commit()
 
+    def limit_mb(self, media_type: MediaType) -> int:
+        """Return the configured per-type cache limit in MB."""
+        cfg = self._config_provider()
+        limit_mb = max(0, int(cfg.get_int(f"cache.local.{media_type}_max_mb", 0)))
+        return limit_mb
+
+    def stats(self, media_type: MediaType) -> dict[str, Any]:
+        """Return count, size, and configured limit for one media type."""
+        files = list(self._iter_files(media_type))
+        total_size = sum(path.stat().st_size for path in files)
+        limit_mb = self.limit_mb(media_type)
+        limit_bytes = limit_mb * 1024 * 1024
+        usage_ratio = (total_size / limit_bytes) if limit_bytes > 0 else None
+        usage_percent = round(usage_ratio * 100, 1) if usage_ratio is not None else None
+        return {
+            "count": len(files),
+            "size_mb": round(total_size / 1024 / 1024, 2),
+            "size_bytes": total_size,
+            "limit_mb": limit_mb,
+            "limit_bytes": limit_bytes,
+            "limited": limit_bytes > 0,
+            "usage_ratio": round(usage_ratio, 4) if usage_ratio is not None else None,
+            "usage_percent": usage_percent,
+        }
+
+    def list_files(
+        self,
+        media_type: MediaType,
+        *,
+        page: int = 1,
+        page_size: int = 1000,
+    ) -> dict[str, Any]:
+        """Return paginated local media files newest first."""
+        files = sorted(
+            self._iter_files(media_type),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        total = len(files)
+        start = max(0, page - 1) * page_size
+        chunk = files[start : start + page_size]
+        items = []
+        for path in chunk:
+            stat = path.stat()
+            items.append({
+                "name": path.name,
+                "size_bytes": stat.st_size,
+                "modified_at": stat.st_mtime,
+            })
+        return {"total": total, "page": page, "page_size": page_size, "items": items}
+
     def delete(self, media_type: MediaType, name: str) -> bool:
         """Delete a single local media file and keep the index consistent."""
         safe_name = self._validate_name(media_type, name)
@@ -138,9 +189,7 @@ class LocalMediaCacheStore:
         return path
 
     def _limit_bytes(self, media_type: MediaType) -> int:
-        cfg = self._config_provider()
-        limit_mb = max(0, int(cfg.get_int(f"cache.local.{media_type}_max_mb", 0)))
-        return limit_mb * 1024 * 1024
+        return self.limit_mb(media_type) * 1024 * 1024
 
     def _target_bytes(self, max_bytes: int) -> int:
         return max(0, int(max_bytes * _LOW_WATERMARK_RATIO))
@@ -479,6 +528,21 @@ def delete_local_media_file(media_type: MediaType, name: str) -> bool:
     return local_media_cache.delete(media_type, name)
 
 
+def local_media_stats(media_type: MediaType) -> dict[str, Any]:
+    """Return count, size, and configured limit for local media files."""
+    return local_media_cache.stats(media_type)
+
+
+def list_local_media_files(
+    media_type: MediaType,
+    *,
+    page: int = 1,
+    page_size: int = 1000,
+) -> dict[str, Any]:
+    """Return paginated local media files newest first."""
+    return local_media_cache.list_files(media_type, page=page, page_size=page_size)
+
+
 async def reconcile_local_media_cache_async(
     media_type: MediaType | None = None,
 ) -> None:
@@ -494,7 +558,9 @@ __all__ = [
     "LocalMediaCacheStore",
     "clear_local_media_files",
     "delete_local_media_file",
+    "list_local_media_files",
     "local_media_cache",
+    "local_media_stats",
     "reconcile_local_media_cache_async",
     "save_local_image",
     "save_local_video",

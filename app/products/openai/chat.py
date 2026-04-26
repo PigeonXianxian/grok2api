@@ -191,6 +191,61 @@ def _feedback_kind(exc: BaseException) -> "FeedbackKind":
     return feedback_kind_for_error(exc)
 
 
+EMPTY_UPSTREAM_BODY = "empty_response"
+
+
+def _empty_upstream_response_error() -> UpstreamError:
+    return UpstreamError(
+        "Upstream returned empty response",
+        status=429,
+        body=EMPTY_UPSTREAM_BODY,
+    )
+
+
+def _adapter_has_visible_output(
+    adapter: StreamAdapter,
+    *,
+    extra_text: str = "",
+    has_tool_calls: bool = False,
+) -> bool:
+    """Return True when the adapter has user-visible response content.
+
+    Thinking/reasoning buffers intentionally do not count here.
+    """
+    if has_tool_calls:
+        return True
+    if (extra_text or "".join(adapter.text_buf)).strip():
+        return True
+    if adapter.image_urls:
+        return True
+    if adapter.references_suffix().strip():
+        return True
+    if adapter.search_sources_list():
+        return True
+    return False
+
+
+class _StreamStartGate:
+    """Buffer stream events until a visible payload is available."""
+
+    __slots__ = ("_pending", "visible")
+
+    def __init__(self) -> None:
+        self._pending: list[str] = []
+        self.visible = False
+
+    def emit(self, chunk: str, *, visible: bool = False) -> list[str]:
+        if visible and not self.visible:
+            self.visible = True
+            out = self._pending + [chunk]
+            self._pending = []
+            return out
+        if self.visible:
+            return [chunk]
+        self._pending.append(chunk)
+        return []
+
+
 async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
     """Download image bytes via the shared asset transport used by /v1/images."""
     from app.dataplane.reverse.protocol.xai_assets import infer_content_type
@@ -513,6 +568,7 @@ async def completions(
                         ended = False
                         sieve = ToolSieve(tool_names)
                         tool_calls_emitted = False
+                        gate = _StreamStartGate()
                         async for line in _stream_chat(
                             token=token,
                             mode_id=ModeId(selected_mode_id),
@@ -538,8 +594,15 @@ async def completions(
                                             chunk = make_stream_chunk(
                                                 response_id, model, safe_text
                                             )
-                                            yield f"data: {orjson.dumps(chunk).decode()}\n\n"
-                                        if parsed_calls is not None:
+                                            payload = f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                            for out in gate.emit(
+                                                payload, visible=bool(safe_text.strip())
+                                            ):
+                                                yield out
+                                        if parsed_calls:
+                                            for out in gate.emit("", visible=True):
+                                                if out:
+                                                    yield out
                                             for i, tc in enumerate(parsed_calls):
                                                 chunk = make_tool_call_chunk(
                                                     response_id,
@@ -571,12 +634,18 @@ async def completions(
                                         chunk = make_stream_chunk(
                                             response_id, model, ev.content
                                         )
-                                        yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                        payload = f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                        for out in gate.emit(
+                                            payload, visible=bool(ev.content.strip())
+                                        ):
+                                            yield out
                                 elif ev.kind == "thinking" and emit_think:
                                     chunk = make_thinking_chunk(
                                         response_id, model, ev.content
                                     )
-                                    yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                    payload = f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                    for out in gate.emit(payload):
+                                        yield out
                                 elif ev.kind == "annotation" and ev.annotation_data:
                                     collected_annotations.append(ev.annotation_data)
                                 elif ev.kind == "soft_stop":
@@ -589,6 +658,9 @@ async def completions(
                             # Stream ended — flush sieve for any buffered XML
                             flushed_calls = sieve.flush()
                             if flushed_calls:
+                                for out in gate.emit("", visible=True):
+                                    if out:
+                                        yield out
                                 for i, tc in enumerate(flushed_calls):
                                     chunk = make_tool_call_chunk(
                                         response_id,
@@ -623,14 +695,25 @@ async def completions(
                                 chunk = make_stream_chunk(
                                     response_id, model, img_text + "\n"
                                 )
-                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                payload = f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                for out in gate.emit(
+                                    payload, visible=bool(img_text.strip())
+                                ):
+                                    yield out
 
                             references = adapter.references_suffix()
                             if references:
                                 chunk = make_stream_chunk(
                                     response_id, model, references
                                 )
-                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                payload = f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                for out in gate.emit(payload, visible=True):
+                                    yield out
+
+                            if not _adapter_has_visible_output(
+                                adapter, has_tool_calls=tool_calls_emitted
+                            ):
+                                raise _empty_upstream_response_error()
 
                             chat_anns = _to_chat_annotations(collected_annotations)
                             final = make_stream_chunk(
@@ -644,8 +727,11 @@ async def completions(
                             sources = adapter.search_sources_list()
                             if sources:
                                 final["search_sources"] = sources
-                            yield f"data: {orjson.dumps(final).decode()}\n\n"
-                            yield "data: [DONE]\n\n"
+                            final_payload = f"data: {orjson.dumps(final).decode()}\n\n"
+                            for out in gate.emit(final_payload, visible=True):
+                                yield out
+                            for out in gate.emit("data: [DONE]\n\n"):
+                                yield out
                             success = True
                             logger.info(
                                 "chat stream completed: attempt={}/{} model={} image_count={}",
@@ -750,6 +836,8 @@ async def completions(
                             break
                     if ended:
                         break
+                if not _adapter_has_visible_output(adapter):
+                    raise _empty_upstream_response_error()
                 success = True
 
             except UpstreamError as exc:
@@ -870,6 +958,10 @@ async def completions(
 
 __all__ = [
     "completions",
+    "EMPTY_UPSTREAM_BODY",
+    "_adapter_has_visible_output",
     "_configured_retry_codes",
+    "_empty_upstream_response_error",
     "_should_retry_upstream",
+    "_StreamStartGate",
 ]

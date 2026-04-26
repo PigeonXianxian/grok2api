@@ -21,6 +21,7 @@ from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 from app.products._account_selection import reserve_account, selection_max_retries
 
 from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception, _upstream_body_excerpt
+from .chat import _adapter_has_visible_output, _empty_upstream_response_error, _StreamStartGate
 from .chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
     make_resp_id, build_resp_usage, make_resp_object, format_sse,
@@ -283,13 +284,15 @@ async def create(
             tool_calls_emitted  = False
             detected_fc_items: list[dict] = []
             collected_annotations: list[dict] = []
+            gate = _StreamStartGate()
 
             try:
                 try:
-                    yield format_sse("response.created", {
+                    for out in gate.emit(format_sse("response.created", {
                         "type":     "response.created",
                         "response": make_resp_object(response_id, model, "in_progress", []),
-                    })
+                    })):
+                        yield out
 
                     ended = False
                     async for line in _stream_chat(
@@ -313,49 +316,54 @@ async def create(
                             if ev.kind == "thinking" and emit_think and not reasoning_closed:
                                 if not reasoning_started:
                                     reasoning_started = True
-                                    yield format_sse("response.output_item.added", {
+                                    for out in gate.emit(format_sse("response.output_item.added", {
                                         "type":         "response.output_item.added",
                                         "output_index": 0,
                                         "item":         {
                                             "id": reasoning_id, "type": "reasoning",
                                             "summary": [], "status": "in_progress",
                                         },
-                                    })
-                                    yield format_sse("response.reasoning_summary_part.added", {
+                                    })):
+                                        yield out
+                                    for out in gate.emit(format_sse("response.reasoning_summary_part.added", {
                                         "type":          "response.reasoning_summary_part.added",
                                         "item_id":       reasoning_id,
                                         "output_index":  0,
                                         "summary_index": 0,
                                         "part":          {"type": "summary_text", "text": ""},
-                                    })
+                                    })):
+                                        yield out
                                 think_buf.append(ev.content)
-                                yield format_sse("response.reasoning_summary_text.delta", {
+                                for out in gate.emit(format_sse("response.reasoning_summary_text.delta", {
                                     "type":          "response.reasoning_summary_text.delta",
                                     "item_id":       reasoning_id,
                                     "output_index":  0,
                                     "summary_index": 0,
                                     "delta":         ev.content,
-                                })
+                                })):
+                                    yield out
 
                             elif ev.kind == "text":
                                 if reasoning_started and not reasoning_closed:
                                     reasoning_closed = True
                                     full_think = "".join(think_buf)
-                                    yield format_sse("response.reasoning_summary_text.done", {
+                                    for out in gate.emit(format_sse("response.reasoning_summary_text.done", {
                                         "type":          "response.reasoning_summary_text.done",
                                         "item_id":       reasoning_id,
                                         "output_index":  0,
                                         "summary_index": 0,
                                         "text":          full_think,
-                                    })
-                                    yield format_sse("response.reasoning_summary_part.done", {
+                                    })):
+                                        yield out
+                                    for out in gate.emit(format_sse("response.reasoning_summary_part.done", {
                                         "type":          "response.reasoning_summary_part.done",
                                         "item_id":       reasoning_id,
                                         "output_index":  0,
                                         "summary_index": 0,
                                         "part":          {"type": "summary_text", "text": full_think},
-                                    })
-                                    yield format_sse("response.output_item.done", {
+                                    })):
+                                        yield out
+                                    for out in gate.emit(format_sse("response.output_item.done", {
                                         "type":         "response.output_item.done",
                                         "output_index": 0,
                                         "item":         {
@@ -364,17 +372,19 @@ async def create(
                                             "summary": [{"type": "summary_text", "text": full_think}],
                                             "status":  "completed",
                                         },
-                                    })
+                                    })):
+                                        yield out
 
                                 # Feed through ToolSieve if tools are active
                                 if sieve is not None:
                                     safe_text, calls = sieve.feed(ev.content)
-                                    if calls is not None:
+                                    if calls:
                                         fc_items = _build_fc_items(calls)
                                         detected_fc_items = fc_items
                                         base_idx = 1 if reasoning_started else 0
                                         async for evt in _emit_fc_events(fc_items, base_idx):
-                                            yield evt
+                                            for out in gate.emit(evt, visible=True):
+                                                yield out
                                         tool_calls_emitted = True
                                         ended = True
                                         break
@@ -386,43 +396,47 @@ async def create(
                                     msg_idx = 1 if reasoning_started else 0
                                     if not message_started:
                                         message_started = True
-                                        yield format_sse("response.output_item.added", {
+                                        for out in gate.emit(format_sse("response.output_item.added", {
                                             "type":         "response.output_item.added",
                                             "output_index": msg_idx,
                                             "item":         {
                                                 "id": message_id, "type": "message",
                                                 "role": "assistant", "content": [], "status": "in_progress",
                                             },
-                                        })
-                                        yield format_sse("response.content_part.added", {
+                                        })):
+                                            yield out
+                                        for out in gate.emit(format_sse("response.content_part.added", {
                                             "type":          "response.content_part.added",
                                             "item_id":       message_id,
                                             "output_index":  msg_idx,
                                             "content_index": 0,
                                             "part":          {"type": "output_text", "text": "", "annotations": []},
-                                        })
+                                        })):
+                                            yield out
 
                                     text_buf.append(text_chunk)
-                                    yield format_sse("response.output_text.delta", {
+                                    for out in gate.emit(format_sse("response.output_text.delta", {
                                         "type":          "response.output_text.delta",
                                         "item_id":       message_id,
                                         "output_index":  msg_idx,
                                         "content_index": 0,
                                         "delta":         text_chunk,
-                                    })
+                                    }), visible=bool(text_chunk.strip())):
+                                        yield out
 
                             elif ev.kind == "annotation" and ev.annotation_data:
                                 if message_started:
                                     collected_annotations.append(ev.annotation_data)
                                     msg_idx = 1 if reasoning_started else 0
-                                    yield format_sse("response.output_text.annotation.added", {
+                                    for out in gate.emit(format_sse("response.output_text.annotation.added", {
                                         "type":             "response.output_text.annotation.added",
                                         "item_id":          message_id,
                                         "output_index":     msg_idx,
                                         "content_index":    0,
                                         "annotation_index": len(collected_annotations) - 1,
                                         "annotation":       ev.annotation_data,
-                                    })
+                                    })):
+                                        yield out
 
                             elif ev.kind == "soft_stop":
                                 ended = True
@@ -439,7 +453,8 @@ async def create(
                             detected_fc_items = fc_items
                             base_idx = 1 if reasoning_started else 0
                             async for evt in _emit_fc_events(fc_items, base_idx):
-                                yield evt
+                                for out in gate.emit(evt, visible=True):
+                                    yield out
                             tool_calls_emitted = True
 
                     if tool_calls_emitted:
@@ -457,14 +472,16 @@ async def create(
                         pt = estimate_prompt_tokens(message)
                         ct = estimate_tool_call_tokens(detected_fc_items)
                         rt = estimate_tokens(full_think) if full_think else 0
-                        yield format_sse("response.completed", {
+                        for out in gate.emit(format_sse("response.completed", {
                             "type":     "response.completed",
                             "response": make_resp_object(
                                 response_id, model, "completed", output,
                                 build_resp_usage(pt, ct + rt, rt),
                             ),
-                        })
-                        yield "data: [DONE]\n\n"
+                        }), visible=True):
+                            yield out
+                        for out in gate.emit("data: [DONE]\n\n"):
+                            yield out
                         success = True
                         logger.info("responses stream tool_calls: attempt={}/{} model={}",
                                     attempt + 1, max_retries + 1, model)
@@ -476,42 +493,48 @@ async def create(
                             img_md   = img_text + "\n"
                             text_buf.append(img_md)
                             if message_started:
-                                yield format_sse("response.output_text.delta", {
+                                for out in gate.emit(format_sse("response.output_text.delta", {
                                     "type":          "response.output_text.delta",
                                     "item_id":       message_id,
                                     "output_index":  msg_idx,
                                     "content_index": 0,
                                     "delta":         img_md,
-                                })
+                                }), visible=bool(img_text.strip())):
+                                    yield out
 
                         references = adapter.references_suffix()
                         if references:
                             text_buf.append(references)
                             if message_started:
-                                yield format_sse("response.output_text.delta", {
+                                for out in gate.emit(format_sse("response.output_text.delta", {
                                     "type":          "response.output_text.delta",
                                     "item_id":       message_id,
                                     "output_index":  msg_idx,
                                     "content_index": 0,
                                     "delta":         references,
-                                })
+                                }), visible=True):
+                                    yield out
 
                         full_text = "".join(text_buf)
+                        if not _adapter_has_visible_output(adapter, extra_text=full_text):
+                            raise _empty_upstream_response_error()
                         if message_started:
-                            yield format_sse("response.output_text.done", {
+                            for out in gate.emit(format_sse("response.output_text.done", {
                                 "type":          "response.output_text.done",
                                 "item_id":       message_id,
                                 "output_index":  msg_idx,
                                 "content_index": 0,
                                 "text":          full_text,
-                            })
-                            yield format_sse("response.content_part.done", {
+                            })):
+                                yield out
+                            for out in gate.emit(format_sse("response.content_part.done", {
                                 "type":          "response.content_part.done",
                                 "item_id":       message_id,
                                 "output_index":  msg_idx,
                                 "content_index": 0,
                                 "part":          {"type": "output_text", "text": full_text, "annotations": collected_annotations},
-                            })
+                            })):
+                                yield out
                             # 构建 message item（流式 output_item.done + response.completed 共用）
                             sources = adapter.search_sources_list()
                             msg_item: dict = {
@@ -523,11 +546,12 @@ async def create(
                             }
                             if sources:
                                 msg_item["search_sources"] = sources
-                            yield format_sse("response.output_item.done", {
+                            for out in gate.emit(format_sse("response.output_item.done", {
                                 "type":         "response.output_item.done",
                                 "output_index": msg_idx,
                                 "item":         msg_item,
-                            })
+                            })):
+                                yield out
 
                         full_think = "".join(think_buf)
                         output = []
@@ -555,14 +579,16 @@ async def create(
                         pt  = estimate_prompt_tokens(message)
                         ct  = estimate_tokens(full_text)
                         rt  = estimate_tokens(full_think) if full_think else 0
-                        yield format_sse("response.completed", {
+                        for out in gate.emit(format_sse("response.completed", {
                             "type":     "response.completed",
                             "response": make_resp_object(
                                 response_id, model, "completed", output,
                                 build_resp_usage(pt, ct + rt, rt),
                             ),
-                        })
-                        yield "data: [DONE]\n\n"
+                        }), visible=True):
+                            yield out
+                        for out in gate.emit("data: [DONE]\n\n"):
+                            yield out
                         success = True
                         logger.info("responses stream completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
                                     attempt + 1, max_retries + 1, model,
@@ -644,6 +670,8 @@ async def create(
                             break
                     if ended:
                         break
+                if not _adapter_has_visible_output(adapter):
+                    raise _empty_upstream_response_error()
                 success = True
 
             except UpstreamError as exc:

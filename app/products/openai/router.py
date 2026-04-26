@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
 from app.control.account.state_machine import is_manageable
 from app.platform.auth.middleware import verify_api_key
-from app.platform.errors import AppError, ValidationError
+from app.platform.errors import AppError, UpstreamError, ValidationError
 from app.platform.logging.logger import logger
 from app.platform.storage import image_files_dir, video_files_dir
 from app.control.model import registry as model_registry
@@ -125,6 +125,26 @@ async def _safe_sse(stream: AsyncIterable[str]) -> AsyncGenerator[str, None]:
         ).decode()
         yield f"event: error\ndata: {payload}\n\n"
         yield "data: [DONE]\n\n"
+
+
+async def _prime_sse(stream: AsyncIterable[str]) -> AsyncGenerator[str, None]:
+    """Read the first chunk before StreamingResponse sends HTTP 200."""
+    iterator = stream.__aiter__()
+    try:
+        first = await anext(iterator)
+    except StopAsyncIteration as exc:
+        raise UpstreamError(
+            "Upstream returned empty response",
+            status=429,
+            body="empty_response",
+        ) from exc
+
+    async def _primed() -> AsyncGenerator[str, None]:
+        yield first
+        async for chunk in iterator:
+            yield chunk
+
+    return _primed()
 
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive"}
@@ -335,6 +355,8 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
 
     if isinstance(result, dict):
         return JSONResponse(result)
+    if not (spec.is_image_edit() or spec.is_image() or spec.is_video()):
+        result = await _prime_sse(result)
     return StreamingResponse(
         _safe_sse(result), media_type="text/event-stream", headers=_SSE_HEADERS
     )
@@ -414,6 +436,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
 
     if isinstance(result, dict):
         return JSONResponse(result)
+    result = await _prime_sse(result)
     return StreamingResponse(
         _safe_sse_responses(result),
         media_type = "text/event-stream",

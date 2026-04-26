@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -76,6 +77,36 @@ class MediaCacheLimitTests(unittest.TestCase):
             self.assertTrue(new_video.exists())
             self.assertFalse((video_dir / "old.mp4").exists())
             self.assertTrue(image_path.exists())
+
+    def test_stats_and_list_files_use_shared_cache_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            image_dir = root / "images"
+            video_dir = root / "videos"
+            image_dir.mkdir()
+            video_dir.mkdir()
+
+            older = image_dir / "older.png"
+            newer = image_dir / "newer.jpg"
+            ignored = image_dir / "ignored.txt"
+            older.write_bytes(b"a" * 128)
+            newer.write_bytes(b"b" * 256)
+            ignored.write_text("skip")
+            os.utime(older, (100, 100))
+            os.utime(newer, (200, 200))
+
+            store = LocalMediaCacheStore(
+                config_provider=lambda: _StubConfig(image_max_mb=1)
+            )
+            with patch("app.platform.storage.media_cache.image_files_dir", return_value=image_dir):
+                with patch("app.platform.storage.media_cache.video_files_dir", return_value=video_dir):
+                    stats = store.stats("image")
+                    listing = store.list_files("image", page=1, page_size=10)
+
+            self.assertEqual(stats["count"], 2)
+            self.assertEqual(stats["size_bytes"], 384)
+            self.assertEqual(stats["limit_mb"], 1)
+            self.assertEqual([item["name"] for item in listing["items"]], ["newer.jpg", "older.png"])
 
 
 if __name__ == "__main__":
