@@ -8,6 +8,7 @@ Two modes:
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import ms_to_s
 from app.control.account.models import AccountRecord
+from app.control.account.quota_defaults import normalize_quota_set
 from app.control.account.repository import AccountRepository
 from app.control.account.state_machine import derive_status
 from ..shared.enums import POOL_STR_TO_ID, STATUS_STR_TO_ID, StatusId
@@ -16,7 +17,7 @@ from .table import AccountRuntimeTable, make_empty_table
 
 def _record_to_slot_args(record: AccountRecord) -> dict:
     """Extract columnar values from a control-plane AccountRecord."""
-    qs = record.quota_set()
+    qs = normalize_quota_set(record.pool, record.quota_set())
     status_id = STATUS_STR_TO_ID.get(str(derive_status(record)), int(StatusId.ACTIVE))
     pool_id = POOL_STR_TO_ID.get(record.pool, 0)
 

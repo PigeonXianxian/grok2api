@@ -467,8 +467,16 @@ const SCHEMA_DEF = [
               { value: 'local_md', label: 'Markdown（本地代理）', labelKey: 'config.schema.options.imageFormat.localMarkdown', disabledWhen: 'no_app_url', disabledTip: '请先填写 APP 访问地址', disabledTipKey: 'config.disabledTip.appUrlRequired' },
               { value: 'base64', label: 'Base64（内嵌）', labelKey: 'config.schema.options.imageFormat.base64' },
             ],
-            desc: 'grok_url / grok_md 直接返回 Grok CDN 地址，客户端需具备 CDN 访问能力；local_* 模式会先下载到服务端，再通过本地 URL 代理分发；base64 会以内嵌 Data URI 返回。',
+            desc: 'grok_url / grok_md 默认直接返回 Grok CDN 地址；local_* 模式会先下载到服务端，再通过本地 URL 代理分发；base64 会以内嵌 Data URI 返回。开启 Imagine Public 图片代理后，WebSocket 返回的 imagine-public 图片也会本地代理。',
             descKey: 'config.schema.fields.imageFormat.desc',
+          },
+          {
+            key: 'imagine_public_image_proxy',
+            label: 'Imagine Public 图片代理',
+            labelKey: 'config.schema.fields.imaginePublicImageProxy.label',
+            type: 'bool',
+            desc: '开启后将 WebSocket 返回的 imagine-public 图片下载到服务端，再通过本地 URL 代理分发；关闭时保持公开图片直返。',
+            descKey: 'config.schema.fields.imaginePublicImageProxy.desc',
           },
           {
             key: 'video_format',
@@ -496,7 +504,7 @@ const SCHEMA_DEF = [
         section: 'account.refresh',
         fields: [
           { key: 'enabled', label: '启用配额刷新', labelKey: 'config.schema.fields.refreshEnabled.label', type: 'bool', desc: '开启后自动进入配额刷新模式，关闭后自动进入自动重试模式。', descKey: 'config.schema.fields.refreshEnabled.desc', help: '开启：配额刷新模式，scheduler 周期同步真实配额，选号按评分。\n关闭：自动重试模式，不主动探测 upstream，选号随机，出错自动换号重试最多 5 次。\n建议：万级以上账号关闭，避免主动探测触发 upstream 429。', helpKey: 'config.schema.fields.refreshEnabled.help' },
-          { key: 'basic_interval_sec', label: 'Basic 周期（秒）', labelKey: 'config.schema.fields.basicInterval.label', type: 'number', desc: 'basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 36000s。', descKey: 'config.schema.fields.basicInterval.desc' },
+          { key: 'basic_interval_sec', label: 'Basic 周期（秒）', labelKey: 'config.schema.fields.basicInterval.label', type: 'number', desc: 'basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 86400s。', descKey: 'config.schema.fields.basicInterval.desc' },
           { key: 'super_interval_sec', label: 'Super 周期（秒）', labelKey: 'config.schema.fields.superInterval.label', type: 'number', desc: 'super 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。', descKey: 'config.schema.fields.superInterval.desc' },
           { key: 'heavy_interval_sec', label: 'Heavy 周期（秒）', labelKey: 'config.schema.fields.heavyInterval.label', type: 'number', desc: 'heavy 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 7200s。', descKey: 'config.schema.fields.heavyInterval.desc' },
           { key: 'on_demand_min_interval_sec', label: '按需刷新间隔（秒）', labelKey: 'config.schema.fields.onDemandMinInterval.label', type: 'number', desc: '请求链路触发刷新（例如收到 429）时的节流间隔。N 秒内重复触发只执行一次，避免批量打爆配额接口。', descKey: 'config.schema.fields.onDemandMinInterval.desc' },

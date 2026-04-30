@@ -3,7 +3,7 @@
 Runs one independent loop per pool type (basic / super / heavy), each with
 its own configurable interval read from:
 
-    account.refresh.basic_interval_sec  (default 36000 — 10 h)
+    account.refresh.basic_interval_sec  (default 86400 — 24 h)
     account.refresh.super_interval_sec  (default  7200 —  2 h)
     account.refresh.heavy_interval_sec  (default  7200 —  2 h)
 """
@@ -16,7 +16,7 @@ from .refresh import AccountRefreshService
 
 # Pool → (config key, built-in default seconds)
 _POOL_CONFIG: dict[str, tuple[str, int]] = {
-    "basic": ("account.refresh.basic_interval_sec", 36_000),
+    "basic": ("account.refresh.basic_interval_sec", 86_400),
     "super": ("account.refresh.super_interval_sec",  7_200),
     "heavy": ("account.refresh.heavy_interval_sec",  7_200),
 }

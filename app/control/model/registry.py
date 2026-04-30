@@ -12,10 +12,10 @@ from .spec import ModelSpec
 MODELS: tuple[ModelSpec, ...] = (
     # === Chat ==============================================================
 
-    # Basic+
+    # Basic fast; auto/expert require Super+
     ModelSpec("grok-4.20-0309-non-reasoning",           ModeId.FAST,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning"),
-    ModelSpec("grok-4.20-0309",                         ModeId.AUTO,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309"),
-    ModelSpec("grok-4.20-0309-reasoning",               ModeId.EXPERT,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning"),
+    ModelSpec("grok-4.20-0309",                         ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309"),
+    ModelSpec("grok-4.20-0309-reasoning",               ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning"),
     # Super+
     ModelSpec("grok-4.20-0309-non-reasoning-super",     ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning Super"),
     ModelSpec("grok-4.20-0309-super",                   ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Super"),
@@ -28,8 +28,8 @@ MODELS: tuple[ModelSpec, ...] = (
 
     # --- 硬优先级反向选池 (heavy → super → basic) ---
     ModelSpec("grok-4.20-fast",                         ModeId.FAST,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 Fast",          prefer_best=True),
-    ModelSpec("grok-4.20-auto",                         ModeId.AUTO,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 Auto",          prefer_best=True),
-    ModelSpec("grok-4.20-expert",                       ModeId.EXPERT,   Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 Expert",        prefer_best=True),
+    ModelSpec("grok-4.20-auto",                         ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 Auto",          prefer_best=True),
+    ModelSpec("grok-4.20-expert",                       ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 Expert",        prefer_best=True),
     ModelSpec("grok-4.20-heavy",                        ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 Heavy",         prefer_best=True),
 
     # === grok-4.3 (grok-420-computer-use-sa) ==================================
@@ -38,7 +38,7 @@ MODELS: tuple[ModelSpec, ...] = (
 
     # === Image ==============================================================
 
-    # Basic+
+    # Basic fast
     ModelSpec("grok-imagine-image-lite",                ModeId.FAST,     Tier.BASIC, Capability.IMAGE,      True, "Grok Imagine Image Lite"),
     # Super+
     ModelSpec("grok-imagine-image",                     ModeId.AUTO,     Tier.SUPER, Capability.IMAGE,      True, "Grok Imagine Image"),

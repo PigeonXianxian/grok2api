@@ -939,6 +939,12 @@
       <button type="button" onclick="batchRefreshSel()" id="btn-refresh" class="toolbar-icon-btn" style="display:none">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
       </button>
+      <button type="button" onclick="batchDisableSel()" id="btn-disable" class="toolbar-icon-btn" style="display:none">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M8.5 8.5 15.5 15.5"/></svg>
+      </button>
+      <button type="button" onclick="batchRestoreSel()" id="btn-restore" class="toolbar-icon-btn" style="display:none">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.708"/><path d="M3 4v5h5"/></svg>
+      </button>
       <button type="button" onclick="batchDeleteSel()" id="btn-delete" class="toolbar-icon-btn toolbar-icon-btn-danger" style="display:none">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
       </button>
@@ -1119,6 +1125,8 @@ function applyAccountI18n() {
     ['btn-export', 'account.export', '导出数据'],
     ['btn-nsfw', 'account.batchNsfw', '开启 NSFW'],
     ['btn-refresh', 'account.batchRefresh', '刷新选中'],
+    ['btn-disable', 'account.batchDisable', '禁用选中'],
+    ['btn-restore', 'account.batchRestore', '恢复选中'],
     ['btn-delete', 'account.batchDelete', '删除选中'],
     ['btn-batch-cancel', 'account.cancel', '取消'],
   ];
@@ -1580,7 +1588,7 @@ function toggleRow(el) {
 }
 function updateBatchBtns() {
   const show = sel.size > 0;
-  ['btn-nsfw','btn-refresh','btn-delete'].forEach(id =>
+  ['btn-nsfw','btn-refresh','btn-disable','btn-restore','btn-delete'].forEach(id =>
     document.getElementById(id).style.display = show ? '' : 'none');
 }
 
@@ -1811,7 +1819,7 @@ let _batchEs     = null;
 
 async function _runBatch(endpoint, tokens, label, onDone) {
   const btnCancel = document.getElementById('btn-batch-cancel');
-  ['btn-nsfw','btn-refresh','btn-delete'].forEach(id =>
+  ['btn-nsfw','btn-refresh','btn-disable','btn-restore','btn-delete'].forEach(id =>
     document.getElementById(id).style.display = 'none');
   btnCancel.style.display = '';
 
@@ -1929,6 +1937,45 @@ async function setDisabled(token, disabled) {
 
 function disableOne(token) { setDisabled(token, true); }
 function restoreOne(token) { setDisabled(token, false); }
+
+function batchSetDisabled(disabled) {
+  if (!sel.size) return;
+  const tokens = [...sel];
+  const n = tokens.length;
+  const title = disabled
+    ? tr('account.batchDisableConfirmTitle', null, '批量禁用账号')
+    : tr('account.batchRestoreConfirmTitle', null, '批量恢复账号');
+  const body = disabled
+    ? tr('account.batchDisableConfirmBody', { n }, `确认禁用选中的 <b>${n}</b> 个账户？<br><small style="color:var(--fg-muted)">禁用后这些账号不会参与请求分配，但可随时恢复。</small>`)
+    : tr('account.batchRestoreConfirmBody', { n }, `确认恢复选中的 <b>${n}</b> 个账户？<br><small style="color:var(--fg-muted)">恢复后这些账号将重新参与请求分配。</small>`);
+
+  openConfirm(title, body, async () => {
+    try {
+      showToast(
+        disabled
+          ? tr('account.disablingMany', { n }, `正在禁用 ${n} 个账户…`)
+          : tr('account.restoringMany', { n }, `正在恢复 ${n} 个账户…`),
+        'info',
+      );
+      const d = await _api('POST', '/tokens/disabled/batch', { tokens, disabled });
+      const ok = d.summary?.ok ?? 0;
+      const fail = d.summary?.fail ?? 0;
+      showToast(
+        disabled
+          ? tr('account.disableManyDone', { ok, fail }, `禁用完成：成功 ${ok} 个，失败 ${fail} 个`)
+          : tr('account.restoreManyDone', { ok, fail }, `恢复完成：成功 ${ok} 个，失败 ${fail} 个`),
+        fail > 0 ? 'error' : 'success',
+      );
+      sel.clear();
+      await load();
+    } catch (e) {
+      showToast(`${tr('account.operationFailed', null, '操作失败')}: ${e.message}`, 'error');
+    }
+  });
+}
+
+function batchDisableSel() { batchSetDisabled(true); }
+function batchRestoreSel() { batchSetDisabled(false); }
 
 async function batchRefreshSel() {
   if (!sel.size) return;

@@ -74,12 +74,15 @@ class ModelSpec:
           HEAVY tier  → heavy only
 
         Reversed (prefer_best=True):
-          non-HEAVY   → try heavy first, then super, then basic
+          BASIC tier  → try heavy first, then super, then basic
+          SUPER tier  → try heavy first, then super
           HEAVY tier  → heavy only
         """
         if self.prefer_best:
             if self.tier == Tier.HEAVY:
                 return (2,)  # heavy only
+            if self.tier == Tier.SUPER:
+                return (2, 1)  # heavy, super
             return (2, 1, 0)  # heavy, super, basic
         if self.tier == Tier.BASIC:
             return (0, 1, 2)  # basic, super, heavy

@@ -83,6 +83,8 @@
         "imageRequired": "图像编辑至少需要上传一张参考图",
         "imageOnly": "图像编辑只支持上传图片",
         "videoImageOnly": "视频生成只支持上传图片作为参考图",
+        "imageProxyRequired": "图片加载失败。请先设置 APP 访问地址，并将图片返回格式改为 local_url、local_md 或 base64。",
+        "videoProxyRequired": "视频加载 403，请前往管理页面设置 APP 访问地址后，将频返回格式改为本地代理（ local_url 或 local_html）模式后重试。",
         "requestFailed": "请求失败",
         "initFailed": "聊天页面初始化失败"
       }
@@ -183,6 +185,8 @@
     "batchNsfw": "开启 NSFW",
     "batchNsfwDisable": "关闭 NSFW",
     "batchRefresh": "刷新选中",
+    "batchDisable": "禁用选中",
+    "batchRestore": "恢复选中",
     "batchDelete": "删除选中",
     "colToken": "Token",
     "colType": "账户类型",
@@ -265,6 +269,14 @@
     "restoreConfirmBody": "确认恢复 {token}？<br><small style=\"color:var(--fg-muted)\">恢复后该账号将重新参与请求分配。</small>",
     "restoringOne": "正在恢复账号…",
     "restoreDone": "账号已恢复",
+    "batchDisableConfirmTitle": "批量禁用账号",
+    "batchDisableConfirmBody": "确认禁用选中的 <b>{n}</b> 个账户？<br><small style=\"color:var(--fg-muted)\">禁用后这些账号不会参与请求分配，但可随时恢复。</small>",
+    "disablingMany": "正在禁用 {n} 个账户…",
+    "disableManyDone": "禁用完成：成功 {ok} 个，失败 {fail} 个",
+    "batchRestoreConfirmTitle": "批量恢复账号",
+    "batchRestoreConfirmBody": "确认恢复选中的 <b>{n}</b> 个账户？<br><small style=\"color:var(--fg-muted)\">恢复后这些账号将重新参与请求分配。</small>",
+    "restoringMany": "正在恢复 {n} 个账户…",
+    "restoreManyDone": "恢复完成：成功 {ok} 个，失败 {fail} 个",
     "nsfwConfirmTitle": "启用 NSFW",
     "nsfwConfirmBody": "确认为选中的 <b>{n}</b> 个账户启用 NSFW？",
     "nsfwEnablingOne": "正在启用 NSFW…",
@@ -431,7 +443,11 @@
         },
         "imageFormat": {
           "label": "图片返回格式",
-          "desc": "grok_url / grok_md 直接返回 Grok CDN 地址，客户端需具备 CDN 访问能力；local_* 模式会先下载到服务端，再通过本地 URL 代理分发；base64 会以内嵌 Data URI 返回。"
+          "desc": "grok_url / grok_md 默认直接返回 Grok CDN 地址；local_* 模式会先下载到服务端，再通过本地 URL 代理分发；base64 会以内嵌 Data URI 返回。开启 Imagine Public 图片代理后，WebSocket 返回的 imagine-public 图片也会本地代理。"
+        },
+        "imaginePublicImageProxy": {
+          "label": "Imagine Public 图片代理",
+          "desc": "开启后将 WebSocket 返回的 imagine-public 图片下载到服务端，再通过本地 URL 代理分发；关闭时保持公开图片直返。"
         },
         "videoFormat": {
           "label": "视频返回格式",
@@ -448,7 +464,7 @@
         },
         "basicInterval": {
           "label": "Basic 周期（秒）",
-          "desc": "basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 36000s。"
+          "desc": "basic 号池共用周期：quota 模式下用于后台刷新，random 模式下用于 429 冷却。默认 86400s。"
         },
         "superInterval": {
           "label": "Super 周期（秒）",

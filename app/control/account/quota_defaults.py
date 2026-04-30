@@ -3,12 +3,12 @@
 Canonical quota totals per pool type (from upstream rate-limits API):
 
               auto    fast    expert    heavy    grok_4_3
-  basic         20      60       8        —         —        window: 72000 / 36000 s
+  basic          —      30       —        —         —        window: 86400 s
   super         50     140      50        —        50        window: 7200 s
   heavy        150     400     150       20       150        window: 7200 s
 
-Pool inference uses ``auto.total`` as the primary signal — the three values
-(20 / 50 / 150) are mutually exclusive across pool types.
+Pool inference uses ``auto.total`` as the primary signal for super/heavy
+accounts; basic accounts no longer expose auto/expert windows locally.
 """
 
 from typing import TYPE_CHECKING
@@ -40,10 +40,13 @@ def _w(remaining: int, total: int, window_seconds: int) -> QuotaWindow:
 # Per-pool default quota sets
 # ---------------------------------------------------------------------------
 
+BASIC_FAST_LIMIT = 30
+BASIC_FAST_WINDOW_SECONDS = 86_400
+
 BASIC_QUOTA_DEFAULTS = AccountQuotaSet(
-    auto=_w(20, 20, 72_000),  # 20  queries / 20 h
-    fast=_w(60, 60, 72_000),  # 60  queries / 20 h
-    expert=_w(8, 8, 36_000),  # 8   queries / 10 h
+    auto=_w(0, 0, 0),  # unsupported on basic accounts
+    fast=_w(BASIC_FAST_LIMIT, BASIC_FAST_LIMIT, BASIC_FAST_WINDOW_SECONDS),
+    expert=_w(0, 0, 0),  # unsupported on basic accounts
 )
 
 SUPER_QUOTA_DEFAULTS = AccountQuotaSet(
@@ -69,7 +72,7 @@ _POOL_DEFAULTS: dict[str, AccountQuotaSet] = {
 }
 
 _SUPPORTED_MODE_IDS_BY_POOL: dict[str, frozenset[int]] = {
-    "basic": frozenset((0, 1, 2)),
+    "basic": frozenset((1,)),
     "super": frozenset((0, 1, 2, 4)),
     "heavy": frozenset((0, 1, 2, 3, 4)),
 }
@@ -124,6 +127,38 @@ def default_quota_window(pool: str, mode_id: int) -> QuotaWindow | None:
     return default_quota_set(pool).get(mode_id)
 
 
+def normalize_quota_window(
+    pool: str, mode_id: int, window: QuotaWindow | None
+) -> QuotaWindow | None:
+    """Apply product-level quota policy for one pool/mode window."""
+    if window is None or not supports_mode(pool, mode_id):
+        return None
+    if pool == "basic" and mode_id == 1:
+        return QuotaWindow(
+            remaining=max(0, min(int(window.remaining), BASIC_FAST_LIMIT)),
+            total=BASIC_FAST_LIMIT,
+            window_seconds=BASIC_FAST_WINDOW_SECONDS,
+            reset_at=window.reset_at,
+            synced_at=window.synced_at,
+            source=window.source,
+        )
+    return window
+
+
+def normalize_quota_set(pool: str, quota_set: AccountQuotaSet) -> AccountQuotaSet:
+    """Return a quota set normalized to the supported modes for *pool*."""
+    defaults = default_quota_set(pool)
+
+    auto = normalize_quota_window(pool, 0, quota_set.auto) or defaults.auto
+    fast = normalize_quota_window(pool, 1, quota_set.fast) or defaults.fast
+    expert = normalize_quota_window(pool, 2, quota_set.expert) or defaults.expert
+
+    qs = AccountQuotaSet(auto=auto, fast=fast, expert=expert)
+    qs.heavy = normalize_quota_window(pool, 3, quota_set.heavy)
+    qs.grok_4_3 = normalize_quota_window(pool, 4, quota_set.grok_4_3)
+    return qs
+
+
 def infer_pool(windows: dict[int, QuotaWindow]) -> str:
     """Infer pool type from live quota windows returned by the rate-limits API.
 
@@ -143,6 +178,8 @@ __all__ = [
     "default_quota_set",
     "default_quota_window",
     "infer_pool",
+    "normalize_quota_set",
+    "normalize_quota_window",
     "supported_mode_ids",
     "supports_mode",
 ]

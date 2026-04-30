@@ -4,6 +4,7 @@ import asyncio
 import base64
 import re
 from typing import Any, AsyncGenerator
+from urllib.parse import urlparse
 
 import orjson
 
@@ -268,6 +269,14 @@ def _save_image(raw: bytes, mime: str, image_id: str) -> str:
     return save_local_image(raw, mime, image_id)
 
 
+def _is_imagine_public_url(url: str) -> bool:
+    try:
+        host = urlparse(url or "").hostname or ""
+    except Exception:
+        return False
+    return host.startswith("imagine-public")
+
+
 async def _resolve_image(token: str, url: str, image_id: str) -> str:
     """Return the image embed text for the response body based on image_format config.
 
@@ -281,10 +290,15 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
     cfg = get_config()
     fmt = _normalize_image_format(cfg.get_str("features.image_format", "grok_url"))
 
+    proxy_imagine_public = (
+        _is_imagine_public_url(url)
+        and cfg.get_bool("features.imagine_public_image_proxy", False)
+    )
+
     # Formats that don't need downloading
-    if fmt == "grok_url":
+    if fmt == "grok_url" and not proxy_imagine_public:
         return url
-    if fmt == "grok_md":
+    if fmt == "grok_md" and not proxy_imagine_public:
         return f"![image]({url})"
 
     # Formats that require downloading
@@ -309,9 +323,9 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
         else f"/v1/files/image?id={file_id}"
     )
 
-    if fmt == "local_url":
+    if fmt in {"grok_url", "local_url"}:
         return local_url
-    return f"![image]({local_url})"  # local_md
+    return f"![image]({local_url})"  # grok_md / local_md
 
 
 def _normalize_image_format(value: str | None) -> str:

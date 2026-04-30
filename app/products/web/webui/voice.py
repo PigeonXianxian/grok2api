@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.platform.errors import AppError, RateLimitError, UpstreamError
-from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.auth.middleware import verify_webui_key
 
@@ -32,11 +31,15 @@ async def voice_token(request: VoiceTokenRequest):
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
-    # Voice uses super/basic pools → try super first, then basic, then heavy.
+    # Voice uses auto mode, which is available on super/heavy pools only.
     from app.control.model.enums import ModeId
 
     ts = now_s()
-    acct = await _acct_dir.reserve(pool_candidates=(1, 0, 2), mode_id=int(ModeId.AUTO), now_s_override=ts)
+    acct = await _acct_dir.reserve(
+        pool_candidates=(1, 2),
+        mode_id=int(ModeId.AUTO),
+        now_s_override=ts,
+    )
     if acct is None:
         raise RateLimitError("No available tokens for voice mode")
 

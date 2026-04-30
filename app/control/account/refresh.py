@@ -15,6 +15,7 @@ from .models import AccountRecord, QuotaWindow
 from .quota_defaults import (
     default_quota_window,
     infer_pool,
+    normalize_quota_window,
     supported_mode_ids,
     supports_mode,
 )
@@ -78,7 +79,7 @@ class AccountRefreshService:
         """Fetch quota windows for every mode supported by *pool*.
 
         Examples:
-          - basic -> auto / fast / expert
+          - basic -> fast
           - super -> auto / fast / expert / grok_4_3
           - heavy -> auto / fast / expert / heavy / grok_4_3
         """
@@ -258,7 +259,10 @@ class AccountRefreshService:
         for mode in ALL_MODES_FULL:
             mode_id = int(mode)
             if mode_id in windows:
-                patches[_MODE_KEYS[mode_id]] = windows[mode_id].to_dict()
+                window = normalize_quota_window(record.pool, mode_id, windows[mode_id])
+                if window is None:
+                    continue
+                patches[_MODE_KEYS[mode_id]] = window.to_dict()
                 refreshed = True
             elif apply_fallback:
                 existing = qs.get(mode_id)
@@ -448,7 +452,16 @@ class AccountRefreshService:
 
         quota_patch: dict[str, dict] = {}
         if window is not None:
-            quota_patch[mode_key] = window.to_dict()
+            normalized = normalize_quota_window(record.pool, mode_id, window)
+            if normalized is None:
+                logger.debug(
+                    "account single-mode quota patch skipped: token={}... pool={} mode_id={} reason=unsupported_mode",
+                    record.token[:10],
+                    record.pool,
+                    mode_id,
+                )
+                return
+            quota_patch[mode_key] = normalized.to_dict()
         else:
             existing = qs.get(mode_id)
             if existing is not None:

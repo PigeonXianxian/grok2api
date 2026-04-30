@@ -16,6 +16,7 @@ from app.platform.logging.logger import logger
 from app.platform.storage import image_files_dir, video_files_dir
 from app.control.model import registry as model_registry
 from app.control.model.spec import ModelSpec
+from app.control.account.quota_defaults import supports_mode
 from .schemas import (
     ChatCompletionRequest,
     ImageGenerationRequest,
@@ -48,8 +49,11 @@ async def _available_pools(request: Request) -> frozenset[str]:
 def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
     if not spec.enabled:
         return False
-    candidates = {_POOL_ID_TO_NAME[pool_id] for pool_id in spec.pool_candidates()}
-    return bool(candidates & pools)
+    for pool_id in spec.pool_candidates():
+        pool = _POOL_ID_TO_NAME[pool_id]
+        if pool in pools and supports_mode(pool, int(spec.mode_id)):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -499,9 +503,9 @@ async def videos_create(
 
     references_payload = None
     if input_reference:
-        if len(input_reference) > 5:
+        if len(input_reference) > 7:
             raise ValidationError(
-                "Video generation supports at most 5 reference images",
+                "Video generation supports at most 7 reference images",
                 param="input_reference",
             )
         references_payload = [

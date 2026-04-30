@@ -83,6 +83,8 @@
         "imageRequired": "Image edit requires at least one reference image",
         "imageOnly": "Image edit only supports image uploads",
         "videoImageOnly": "Video generation only supports image reference uploads",
+        "imageProxyRequired": "Image failed to load. Set APP Base URL and change image output format to local_url, local_md, or base64.",
+        "videoProxyRequired": "Video loading returned 403. Go to the admin page, set the APP Base URL, then change the video output format to local proxy mode (local_url or local_html) and retry.",
         "requestFailed": "Request failed",
         "initFailed": "Chat page initialization failed"
       }
@@ -183,6 +185,8 @@
     "batchNsfw": "Enable NSFW",
     "batchNsfwDisable": "Disable NSFW",
     "batchRefresh": "Refresh Selected",
+    "batchDisable": "Disable Selected",
+    "batchRestore": "Restore Selected",
     "batchDelete": "Delete Selected",
     "colToken": "Token",
     "colType": "Account Type",
@@ -265,6 +269,14 @@
     "restoreConfirmBody": "Restore {token}?<br><small style=\"color:var(--fg-muted)\">The account will be returned to request allocation.</small>",
     "restoringOne": "Restoring account…",
     "restoreDone": "Account restored",
+    "batchDisableConfirmTitle": "Disable Accounts",
+    "batchDisableConfirmBody": "Disable the selected <b>{n}</b> accounts?<br><small style=\"color:var(--fg-muted)\">Disabled accounts are removed from request allocation and can be restored later.</small>",
+    "disablingMany": "Disabling {n} accounts…",
+    "disableManyDone": "Disable completed: {ok} succeeded, {fail} failed",
+    "batchRestoreConfirmTitle": "Restore Accounts",
+    "batchRestoreConfirmBody": "Restore the selected <b>{n}</b> accounts?<br><small style=\"color:var(--fg-muted)\">Restored accounts will be returned to request allocation.</small>",
+    "restoringMany": "Restoring {n} accounts…",
+    "restoreManyDone": "Restore completed: {ok} succeeded, {fail} failed",
     "nsfwConfirmTitle": "Enable NSFW",
     "nsfwConfirmBody": "Enable NSFW for <b>{n}</b> selected accounts?",
     "nsfwEnablingOne": "Enabling NSFW…",
@@ -431,7 +443,11 @@
         },
         "imageFormat": {
           "label": "Image Output Format",
-          "desc": "grok_url and grok_md return the native Grok CDN address directly. local_* modes download assets to the server first and re-expose them through the local proxy. base64 returns an inline Data URI."
+          "desc": "grok_url and grok_md return the native Grok CDN address directly by default. local_* modes download assets to the server first and re-expose them through the local proxy. base64 returns an inline Data URI. When Imagine Public Image Proxy is enabled, imagine-public images returned by the WebSocket are also proxied locally."
+        },
+        "imaginePublicImageProxy": {
+          "label": "Imagine Public Image Proxy",
+          "desc": "When enabled, imagine-public images returned by the WebSocket are downloaded to the server and delivered through the local proxy. When disabled, public images are returned directly."
         },
         "videoFormat": {
           "label": "Video Output Format",
@@ -448,7 +464,7 @@
         },
         "basicInterval": {
           "label": "Basic Cycle (s)",
-          "desc": "Shared cycle for the basic pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 36000s."
+          "desc": "Shared cycle for the basic pool: used for background refresh in quota mode and for 429 cooldown in random mode. Default 86400s."
         },
         "superInterval": {
           "label": "Super Cycle (s)",

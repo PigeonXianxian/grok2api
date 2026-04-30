@@ -32,6 +32,7 @@ from loguru import logger
 from app.platform.paths import data_path
 
 if TYPE_CHECKING:
+    from app.control.account.commands import AccountPatch
     from app.control.account.repository import AccountRepository
     from app.platform.config.backends.base import ConfigBackend
 
@@ -52,8 +53,10 @@ async def run_startup_migrations(
 ) -> None:
     """Run all first-boot migrations.  Safe to call on every startup."""
     await _migrate_config(config_backend)
+    await _migrate_basic_refresh_interval(config_backend)
     await _migrate_accounts(account_repo)
     await _backfill_grok_4_3_quota(account_repo)
+    await _normalize_basic_fast_only_quota(account_repo)
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +95,21 @@ async def _migrate_config(backend: "ConfigBackend") -> None:
     logger.debug("config: {} backend is empty, no local overrides to migrate", backend_name)
 
 
+async def _migrate_basic_refresh_interval(backend: "ConfigBackend") -> None:
+    data = await backend.load()
+    account = data.get("account", {})
+    refresh = account.get("refresh", {}) if isinstance(account, dict) else {}
+    value = refresh.get("basic_interval_sec") if isinstance(refresh, dict) else None
+    try:
+        old_default = int(value)
+    except (TypeError, ValueError):
+        return
+    if old_default != 36_000:
+        return
+    await backend.apply_patch({"account": {"refresh": {"basic_interval_sec": 86_400}}})
+    logger.info("config: updated basic refresh interval default from 36000s to 86400s")
+
+
 # ---------------------------------------------------------------------------
 # Account migration
 # ---------------------------------------------------------------------------
@@ -124,7 +142,7 @@ async def _migrate_accounts(target_repo: "AccountRepository") -> None:
 async def _copy_accounts(sqlite_path: Path, target: "AccountRepository") -> int:
     """Read all accounts from the local SQLite file and write to *target*."""
     from app.control.account.backends.local import LocalAccountRepository
-    from app.control.account.commands import AccountPatch, AccountUpsert, ListAccountsQuery
+    from app.control.account.commands import AccountUpsert, ListAccountsQuery
 
     source = LocalAccountRepository(sqlite_path)
     await source.initialize()
@@ -229,6 +247,48 @@ async def _backfill_grok_4_3_quota(repo: "AccountRepository") -> None:
         res = await repo.patch_accounts(batch)
         total += res.patched
     logger.info("account: backfilled quota_grok_4_3 for {} super/heavy accounts", total)
+
+
+async def _normalize_basic_fast_only_quota(repo: "AccountRepository") -> None:
+    from app.control.account.commands import AccountPatch, ListAccountsQuery
+    from app.control.account.quota_defaults import normalize_quota_set
+
+    patches: list[AccountPatch] = []
+    page = 1
+    while True:
+        result = await repo.list_accounts(
+            ListAccountsQuery(
+                page=page,
+                page_size=_BATCH,
+                pool="basic",
+                include_deleted=False,
+            )
+        )
+        for record in result.items:
+            normalized = normalize_quota_set("basic", record.quota_set())
+            if normalized.to_dict() == record.quota_set().to_dict():
+                continue
+            patches.append(
+                AccountPatch(
+                    token=record.token,
+                    quota_auto=normalized.auto.to_dict(),
+                    quota_fast=normalized.fast.to_dict(),
+                    quota_expert=normalized.expert.to_dict(),
+                )
+            )
+        if page >= result.total_pages:
+            break
+        page += 1
+
+    if not patches:
+        return
+
+    total = 0
+    for i in range(0, len(patches), _BATCH):
+        batch = patches[i : i + _BATCH]
+        res = await repo.patch_accounts(batch)
+        total += res.patched
+    logger.info("account: normalized {} basic accounts to fast-only quota", total)
 
 
 # ---------------------------------------------------------------------------
