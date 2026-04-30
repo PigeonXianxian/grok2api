@@ -78,9 +78,9 @@ mode = "direct"
 proxy_url = ""
 # 基础代理池（API 流量，proxy_pool 模式必填）
 proxy_pool = []
-# 资源代理 URL（图片/视频下载，未配置则回落到 proxy_url）
+# 资源代理 URL（图片/视频下载，未配置则直连）
 resource_proxy_url = ""
-# 资源代理池（图片/视频下载，未配置则回落到 proxy_pool）
+# 资源代理池（图片/视频下载，未配置则直连）
 resource_proxy_pool = []
 # 跳过代理 SSL 证书验证（代理使用自签名证书时启用）
 skip_ssl_verify = false

@@ -7,7 +7,7 @@ from app.control.account.enums import FeedbackKind
 from app.platform.errors import UpstreamError
 from app.products.anthropic import messages as anthropic_messages
 from app.products.anthropic import router as anthropic_router
-from app.products.openai import chat, responses
+from app.products.openai import chat, responses, video
 from app.products.openai import router as openai_router
 
 
@@ -69,6 +69,10 @@ async def _empty_stream(**kwargs):
     yield "data: [DONE]"
 
 
+async def _empty_video_stream(*args, **kwargs):
+    yield "data: [DONE]"
+
+
 async def _noop_async(*args, **kwargs):
     return None
 
@@ -105,6 +109,30 @@ class EmptyResponseHandlingTests(unittest.TestCase):
 
         self.assertEqual(exc.status, 429)
         self.assertEqual(exc.details["body"], chat.EMPTY_UPSTREAM_BODY)
+
+    def test_video_empty_response_error_is_retryable_429(self) -> None:
+        exc = video._empty_video_response_error()
+
+        self.assertEqual(exc.status, 429)
+        self.assertEqual(exc.details["body"], chat.EMPTY_UPSTREAM_BODY)
+
+    def test_video_segment_empty_stream_raises_429(self) -> None:
+        async def _run() -> None:
+            await video._collect_video_segment(
+                token="tok-test",
+                payload={},
+                referer="https://grok.com/imagine",
+                timeout_s=1,
+            )
+
+        with self.assertRaises(UpstreamError) as ctx:
+            with patch.object(
+                video, "_stream_video_request", side_effect=_empty_video_stream
+            ):
+                asyncio.run(_run())
+
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertEqual(ctx.exception.details["body"], chat.EMPTY_UPSTREAM_BODY)
 
     def test_stream_prime_turns_no_first_chunk_into_429(self) -> None:
         async def _run() -> None:

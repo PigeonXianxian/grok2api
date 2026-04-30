@@ -194,7 +194,11 @@ async def download_asset(
     }
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(scope=ProxyScope.ASSET, kind=RequestKind.HTTP)
+    lease = await proxy.acquire(
+        scope=ProxyScope.ASSET,
+        kind=RequestKind.HTTP,
+        resource=True,
+    )
 
     try:
         stream = await get_bytes_stream(
