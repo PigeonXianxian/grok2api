@@ -208,12 +208,15 @@ def _adapter_has_visible_output(
     *,
     extra_text: str = "",
     has_tool_calls: bool = False,
+    include_thinking: bool = False,
 ) -> bool:
     """Return True when the adapter has user-visible response content.
 
     Thinking/reasoning buffers intentionally do not count here.
     """
     if has_tool_calls:
+        return True
+    if include_thinking and "".join(adapter.thinking_buf).strip():
         return True
     if (extra_text or "".join(adapter.text_buf)).strip():
         return True
@@ -658,7 +661,7 @@ async def completions(
                                         response_id, model, ev.content
                                     )
                                     payload = f"data: {orjson.dumps(chunk).decode()}\n\n"
-                                    for out in gate.emit(payload):
+                                    for out in gate.emit(payload, visible=True):
                                         yield out
                                 elif ev.kind == "annotation" and ev.annotation_data:
                                     collected_annotations.append(ev.annotation_data)
@@ -725,7 +728,9 @@ async def completions(
                                     yield out
 
                             if not _adapter_has_visible_output(
-                                adapter, has_tool_calls=tool_calls_emitted
+                                adapter,
+                                has_tool_calls=tool_calls_emitted,
+                                include_thinking=emit_think,
                             ):
                                 raise _empty_upstream_response_error()
 

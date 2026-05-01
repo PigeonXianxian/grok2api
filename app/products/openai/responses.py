@@ -7,8 +7,6 @@ Streaming emits standard Responses API SSE events.
 import asyncio
 from typing import Any, AsyncGenerator
 
-import orjson
-
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
@@ -20,14 +18,14 @@ from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
 from app.products._account_selection import reserve_account, selection_max_retries
 
-from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception, _upstream_body_excerpt
+from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _feedback_kind, _log_task_exception, _upstream_body_excerpt
 from .chat import _adapter_has_visible_output, _empty_upstream_response_error, _StreamStartGate
 from .chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
     make_resp_id, build_resp_usage, make_resp_object, format_sse,
 )
 from app.dataplane.reverse.protocol.tool_prompt import (
-    build_tool_system_prompt, extract_tool_names, inject_into_message, tool_calls_to_xml,
+    build_tool_system_prompt, extract_tool_names, inject_into_message,
 )
 from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
 from ._tool_sieve import ToolSieve
@@ -222,7 +220,6 @@ async def create(
 
     cfg     = get_config()
     spec    = resolve_model(model)
-    mode_id = int(spec.mode_id)   # cast once, reuse everywhere
 
     messages: list[dict] = []
     if instructions:
@@ -323,7 +320,7 @@ async def create(
                                             "id": reasoning_id, "type": "reasoning",
                                             "summary": [], "status": "in_progress",
                                         },
-                                    })):
+                                    }), visible=True):
                                         yield out
                                     for out in gate.emit(format_sse("response.reasoning_summary_part.added", {
                                         "type":          "response.reasoning_summary_part.added",
@@ -331,7 +328,7 @@ async def create(
                                         "output_index":  0,
                                         "summary_index": 0,
                                         "part":          {"type": "summary_text", "text": ""},
-                                    })):
+                                    }), visible=True):
                                         yield out
                                 think_buf.append(ev.content)
                                 for out in gate.emit(format_sse("response.reasoning_summary_text.delta", {
@@ -340,7 +337,7 @@ async def create(
                                     "output_index":  0,
                                     "summary_index": 0,
                                     "delta":         ev.content,
-                                })):
+                                }), visible=True):
                                     yield out
 
                             elif ev.kind == "text":
@@ -516,7 +513,11 @@ async def create(
                                     yield out
 
                         full_text = "".join(text_buf)
-                        if not _adapter_has_visible_output(adapter, extra_text=full_text):
+                        if not _adapter_has_visible_output(
+                            adapter,
+                            extra_text=full_text,
+                            include_thinking=emit_think,
+                        ):
                             raise _empty_upstream_response_error()
                         if message_started:
                             for out in gate.emit(format_sse("response.output_text.done", {
@@ -574,7 +575,8 @@ async def create(
                             sources = adapter.search_sources_list()
                             if sources:
                                 msg_item["search_sources"] = sources
-                        output.append(msg_item)
+                        if message_started or full_text:
+                            output.append(msg_item)
 
                         pt  = estimate_prompt_tokens(message)
                         ct  = estimate_tokens(full_text)
