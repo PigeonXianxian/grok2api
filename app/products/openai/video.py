@@ -121,6 +121,7 @@ class _VideoJob:
     remixed_from_video_id: str | None = None
     video_url: str = ""
     content_path: str = ""
+    content_file_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -141,8 +142,11 @@ class _VideoJob:
             payload["error"] = self.error
         if self.remixed_from_video_id:
             payload["remixed_from_video_id"] = self.remixed_from_video_id
-        if self.status == "completed" and self.content_path:
-            payload["metadata"] = {"url": _video_content_url(self.id)}
+        if self.status == "completed":
+            if self.content_file_id:
+                payload["metadata"] = {"url": _local_video_url(self.content_file_id)}
+            elif self.content_path:
+                payload["metadata"] = {"url": _video_content_url(self.id)}
         return payload
 
 
@@ -1000,13 +1004,15 @@ async def _run_video_job(
 
         artifact, raw = await _run_video_with_account(model=job.model, runner=_runner)
 
-        path = _save_video_bytes(raw, job.id)
+        file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
+        path = _save_video_bytes(raw, file_id)
         async with _VIDEO_JOBS_LOCK:
             job.status = "completed"
             job.progress = 100
             job.completed_at = int(time.time())
             job.video_url = artifact.video_url
             job.content_path = str(path)
+            job.content_file_id = file_id
             job.remixed_from_video_id = artifact.remixed_from_video_id
     except Exception as exc:
         logger.exception("video job failed: job_id={} error={}", job.id, exc)

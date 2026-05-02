@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import tempfile
 import time
 import unittest
@@ -149,6 +150,7 @@ class VideoProxyAndNewApiTests(unittest.TestCase):
                 progress=100,
                 completed_at=int(time.time()),
                 content_path=str(path),
+                content_file_id="08b8238c88e9bbe8423c692cbd04ec52",
             )
 
             with patch.object(video, "get_config", return_value=_AppConfig(app_url="https://api.example.com")):
@@ -156,7 +158,72 @@ class VideoProxyAndNewApiTests(unittest.TestCase):
 
         self.assertEqual(
             payload["metadata"]["url"],
-            "https://api.example.com/v1/videos/video_test/content",
+            "https://api.example.com/v1/files/video?id=08b8238c88e9bbe8423c692cbd04ec52",
+        )
+
+    def test_video_job_saves_with_sync_file_id_and_metadata_url(self) -> None:
+        async def _run(tmpdir: str):
+            artifact = video._VideoArtifact(
+                video_url="https://assets.grok.com/users/u/generated.mp4",
+                video_post_id="post_1",
+                asset_id="asset_1",
+                thumbnail_url="https://assets.grok.com/thumb.jpg",
+            )
+            raw = b"fake-video"
+            saved_ids: list[str] = []
+            job = video._VideoJob(
+                id="video_async",
+                model="grok-imagine-video",
+                prompt="hello",
+                seconds="6",
+                size="720x1280",
+                quality="standard",
+                created_at=int(time.time()),
+            )
+
+            async def _fake_run_video_with_account(*, model, runner):
+                return artifact, raw
+
+            def _fake_save_video_bytes(raw_bytes: bytes, file_id: str) -> Path:
+                saved_ids.append(file_id)
+                path = Path(tmpdir) / f"{file_id}.mp4"
+                path.write_bytes(raw_bytes)
+                return path
+
+            with patch.object(
+                video, "_run_video_with_account", _fake_run_video_with_account
+            ):
+                with patch.object(video, "_save_video_bytes", _fake_save_video_bytes):
+                    await video._run_video_job(
+                        job,
+                        size="720x1280",
+                        resolution_name=None,
+                        prompt="hello",
+                        seconds=6,
+                        preset=None,
+                    )
+
+            with patch.object(
+                video,
+                "get_config",
+                return_value=_AppConfig(app_url="https://api.example.com"),
+            ):
+                payload = job.to_dict()
+
+            return job, payload, saved_ids
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job, payload, saved_ids = asyncio.run(_run(tmpdir))
+
+        expected_file_id = hashlib.sha1(
+            "https://assets.grok.com/users/u/generated.mp4".encode("utf-8")
+        ).hexdigest()[:32]
+        self.assertEqual(saved_ids, [expected_file_id])
+        self.assertEqual(job.content_file_id, expected_file_id)
+        self.assertTrue(job.content_path.endswith(f"{expected_file_id}.mp4"))
+        self.assertEqual(
+            payload["metadata"]["url"],
+            f"https://api.example.com/v1/files/video?id={expected_file_id}",
         )
 
     def test_video_pool_candidates_exclude_basic(self) -> None:
