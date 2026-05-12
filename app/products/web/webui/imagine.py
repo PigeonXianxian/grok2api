@@ -12,7 +12,7 @@ from app.platform.auth.middleware import get_webui_key, is_webui_enabled
 from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
-from app.products.openai.images import resolve_aspect_ratio
+from app.products.openai.images import resolve_aspect_ratio, _resolve_image_output
 
 router = APIRouter()
 
@@ -135,6 +135,22 @@ async def imagine_ws(websocket: WebSocket):
                 if not isinstance(event, dict) or event.get("type") == "_meta":
                     continue
                 event.setdefault("run_id", run_id)
+                if event.get("type") == "image" and event.get("url"):
+                    try:
+                        output = await _resolve_image_output(
+                            token=token,
+                            url=str(event.get("url") or ""),
+                            response_format="url",
+                            blob_b64=str(event.get("blob") or "") or None,
+                        )
+                        event["url"] = output.api_value
+                        event.pop("blob", None)
+                    except Exception as exc:
+                        logger.warning(
+                            "webui imagine image localization failed: image_id={} error={}",
+                            str(event.get("image_id") or "")[:8],
+                            exc,
+                        )
                 await _send(event)
                 if event.get("type") == "error":
                     return

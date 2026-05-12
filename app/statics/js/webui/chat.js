@@ -95,6 +95,20 @@
     }
   }
 
+  function normalizeLocalMediaUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const url = new URL(raw, window.location.origin);
+      if (url.pathname === '/v1/files/image' || url.pathname === '/v1/files/video') {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+    } catch {
+      return raw;
+    }
+    return raw;
+  }
+
   function sanitizeRenderedHtml(html) {
     const template = document.createElement('template');
     template.innerHTML = html;
@@ -309,7 +323,7 @@
   function normalizeMediaContent(source) {
     const input = String(source || '').replace(/\[video\]\(([^)]+)\)/gi, '$1');
     return input.replace(/^(https?:\/\/\S+|\/v1\/files\/(?:image|video)\?id=\S+|data:image\/[^\s]+)$/gm, (match) => {
-      const url = match.trim();
+      const url = normalizeLocalMediaUrl(match);
       if (isImageUrl(url)) return `![image](${url})`;
       if (isVideoUrl(url)) return `<video controls preload="metadata" src="${escapeHtml(url)}"></video>`;
       return match;
@@ -515,7 +529,7 @@
         if (textContent.trim()) parts.push(renderRichMarkdown(textContent));
         if (imageUrls.length) {
           parts.push(imageUrls.map((url) => (
-            `<div class="msg-inline-media"><img src="${escapeHtml(url)}" alt="image" loading="lazy"></div>`
+            `<div class="msg-inline-media"><img src="${escapeHtml(normalizeLocalMediaUrl(url))}" alt="image" loading="lazy"></div>`
           )).join(''));
         }
         card.innerHTML = parts.join('') || '<p></p>';
@@ -536,7 +550,7 @@
         gallery.className = 'msg-user-gallery';
         imageUrls.forEach((url) => {
           const img = document.createElement('img');
-          img.src = url;
+          img.src = normalizeLocalMediaUrl(url);
           img.alt = 'image';
           img.loading = 'lazy';
           gallery.appendChild(img);

@@ -80,6 +80,20 @@
     return url.toString();
   }
 
+  function normalizeLocalMediaUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const url = new URL(raw, window.location.origin);
+      if (url.pathname === '/v1/files/image' || url.pathname === '/v1/files/video') {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+    } catch {
+      return raw;
+    }
+    return raw;
+  }
+
   function resizePromptInput() {
     if (!promptInput) return;
     promptInput.style.height = `${PROMPT_MIN_HEIGHT}px`;
@@ -417,7 +431,7 @@
       slot.progress = Number(payload.progress) || slot.progress || 0;
     } else if (payload.type === 'image') {
       slot.progress = 100;
-      slot.url = String(payload.url || '').trim();
+      slot.url = normalizeLocalMediaUrl(payload.url);
       slot.moderated = false;
     } else if (payload.type === 'moderated') {
       slot.progress = 100;

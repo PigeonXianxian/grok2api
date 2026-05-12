@@ -1,7 +1,9 @@
 services:
   grok2api:
     container_name: grok2api
-    image: ghcr.io/chenyme/grok2api:latest
+    build:
+      context: .
+    image: grok2api:pigeonxianxian-local
     ports:
       - "${HOST_PORT:-8000}:${SERVER_PORT:-8000}"
     environment:

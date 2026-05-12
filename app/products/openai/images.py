@@ -176,7 +176,11 @@ def _app_url() -> str:
 
 def _local_image_url(file_id: str) -> str:
     app_url = _app_url()
-    return f"{app_url}/v1/files/image?id={file_id}"
+    return (
+        f"{app_url}/v1/files/image?id={file_id}"
+        if app_url
+        else f"/v1/files/image?id={file_id}"
+    )
 
 
 def _extract_image_file_id(url: str) -> str:
@@ -227,8 +231,6 @@ async def _resolve_image_output(
         and _is_imagine_public_url(url)
         and not cfg.get_bool("features.imagine_public_image_proxy", False)
     ):
-        return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
-    if fmt == "url" and not _app_url():
         return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
 
     mime = infer_content_type(url) or "image/jpeg"

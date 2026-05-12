@@ -590,6 +590,104 @@ async def videos_content(video_id: str):
 
 
 # ---------------------------------------------------------------------------
+# /v1/video/generations — NewAPI compat surface (aggregator-style JSON)
+# Translates POST JSON and GET status into the /v1/videos pipeline above.
+# ---------------------------------------------------------------------------
+
+
+_NEWAPI_SIZE_MAP = {
+    (720, 1280): "720x1280",
+    (1280, 720): "1280x720",
+    (1024, 1024): "1024x1024",
+    (1024, 1792): "1024x1792",
+    (1792, 1024): "1792x1024",
+    (1080, 1920): "720x1280",
+    (1920, 1080): "1280x720",
+}
+
+
+def _newapi_resolve_size(width: int | None, height: int | None) -> str:
+    if width and height and (width, height) in _NEWAPI_SIZE_MAP:
+        return _NEWAPI_SIZE_MAP[(width, height)]
+    return "720x1280"
+
+
+def _newapi_resolve_seconds(duration: int | None) -> int:
+    supported = (6, 10, 12, 16, 20)
+    if duration is None:
+        return 10
+    return min(supported, key=lambda v: abs(v - int(duration)))
+
+
+@router.post(
+    "/video/generations", tags=[_TAG_VIDEOS], dependencies=[Depends(verify_api_key)]
+)
+async def newapi_video_create(request: Request):
+    from .video import create_video
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise ValidationError("Request body must be JSON") from exc
+    if not isinstance(body, dict):
+        raise ValidationError("Request body must be a JSON object")
+
+    model = str(body.get("model") or "grok-video-3")
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise ValidationError("prompt is required", param="prompt")
+
+    width = body.get("width")
+    height = body.get("height")
+    size = _newapi_resolve_size(
+        int(width) if isinstance(width, (int, float)) else None,
+        int(height) if isinstance(height, (int, float)) else None,
+    )
+    seconds = _newapi_resolve_seconds(
+        int(body["duration"]) if isinstance(body.get("duration"), (int, float)) else None
+    )
+
+    input_references = None
+    image_field = body.get("image")
+    if isinstance(image_field, str) and image_field.strip():
+        input_references = [{"image_url": image_field.strip()}]
+
+    job = await create_video(
+        model=model if model != "grok-video-3" and model != "grok-video-3-10s" else "grok-imagine-video",
+        prompt=prompt,
+        seconds=seconds,
+        size=size,
+        resolution_name="720p",
+        preset="normal",
+        input_references=input_references,
+    )
+    return JSONResponse({"task_id": job.get("id"), "status": "queued", "model": job.get("model")})
+
+
+@router.get(
+    "/video/generations/{task_id}",
+    tags=[_TAG_VIDEOS],
+    dependencies=[Depends(verify_api_key)],
+)
+async def newapi_video_retrieve(task_id: str, request: Request):
+    from .video import retrieve
+
+    job = await retrieve(task_id)
+    status = str(job.get("status") or "")
+    payload: dict = {"task_id": task_id, "status": status, "progress": job.get("progress", 0)}
+    if status == "completed":
+        base = str(request.base_url).rstrip("/")
+        payload["url"] = f"{base}/v1/files/video?id={task_id}"
+        payload["metadata"] = {"duration": int(job.get("seconds") or 0), "seed": None}
+    elif status == "failed":
+        err = job.get("error") or {}
+        payload["error"] = {"message": err.get("message", "video generation failed")}
+    else:
+        payload["status"] = "processing"
+    return JSONResponse(payload)
+
+
+# ---------------------------------------------------------------------------
 # /v1/images/edits (standalone image-edit endpoint)
 # ---------------------------------------------------------------------------
 
@@ -650,7 +748,7 @@ async def serve_video(id: str = Query(..., description="Video file ID")):
     """Serve a locally cached video by file ID."""
     import re
 
-    if not re.fullmatch(r"[0-9a-f\-]{16,36}", id):
+    if not re.fullmatch(r"(?:video_)?[0-9a-f\-]{16,36}", id):
         raise ValidationError("Invalid file ID", param="id")
 
     path = video_files_dir() / f"{id}.mp4"
