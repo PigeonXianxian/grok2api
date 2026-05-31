@@ -688,7 +688,9 @@ async def create(
             if isinstance(img_text, BaseException):
                 logger.warning("messages image resolve failed: error={}", img_text)
             elif isinstance(img_text, str):
-                full_text = (full_text + "\n\n" if full_text else "") + img_text
+                if full_text:
+                    full_text += "\n\n"
+                full_text += img_text
 
     references = adapter.references_suffix()
     if references:
