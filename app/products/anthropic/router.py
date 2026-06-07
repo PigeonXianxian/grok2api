@@ -1,6 +1,6 @@
 """Anthropic Messages API router (/v1/messages)."""
 
-from typing import Any
+from typing import Any, AsyncGenerator, AsyncIterable
 
 import orjson
 from fastapi import APIRouter, Depends, Request
@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.platform.auth.middleware import verify_api_key
-from app.platform.errors import AppError, ValidationError
+from app.platform.errors import AppError, UpstreamError, ValidationError
 from app.platform.logging.logger import logger
 from app.control.model import registry as model_registry
 
@@ -72,6 +72,26 @@ async def _safe_sse_anthropic(stream):
         yield "data: [DONE]\n\n"
 
 
+async def _prime_sse(stream: AsyncIterable[str]) -> AsyncGenerator[str, None]:
+    """Read the first chunk before StreamingResponse sends HTTP 200."""
+    iterator = stream.__aiter__()
+    try:
+        first = await anext(iterator)
+    except StopAsyncIteration as exc:
+        raise UpstreamError(
+            "Upstream returned empty response",
+            status=429,
+            body="empty_response",
+        ) from exc
+
+    async def _primed() -> AsyncGenerator[str, None]:
+        yield first
+        async for chunk in iterator:
+            yield chunk
+
+    return _primed()
+
+
 # ---------------------------------------------------------------------------
 # /v1/messages
 # ---------------------------------------------------------------------------
@@ -118,6 +138,7 @@ async def messages_endpoint(req: MessagesRequest):
 
     if isinstance(result, dict):
         return JSONResponse(result)
+    result = await _prime_sse(result)
     return StreamingResponse(
         _safe_sse_anthropic(result),
         media_type = "text/event-stream",

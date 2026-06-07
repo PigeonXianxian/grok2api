@@ -196,7 +196,10 @@ async def update_config(req: ConfigPatchRequest):
 
     patch = _sanitize_proxy_config(req.root)
     _ensure_runtime_patch_allowed(patch)
-    cache_local_changed = _patch_touches_prefix(patch, "cache.local")
+    cache_local_changed = (
+        _patch_touches_prefix(patch, "cache.local")
+        or _patch_touches_prefix(patch, "storage")
+    )
     await config.update(patch)
     # config.update() only writes to the backend and invalidates the in-memory
     # snapshot (_version = None); it does not refresh the data.  load() is

@@ -22,6 +22,25 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+def _apply_legacy_cache_overrides(user_overrides: dict[str, Any]) -> dict[str, Any]:
+    """Map legacy [storage] cache limits into [cache.local] at load time."""
+    storage = user_overrides.get("storage")
+    if not isinstance(storage, dict):
+        return user_overrides
+
+    cache = user_overrides.setdefault("cache", {})
+    if not isinstance(cache, dict):
+        return user_overrides
+    local = cache.setdefault("local", {})
+    if not isinstance(local, dict):
+        return user_overrides
+
+    for key in ("image_max_mb", "video_max_mb"):
+        if key not in local and key in storage:
+            local[key] = storage[key]
+    return user_overrides
+
+
 class ConfigSnapshot:
     """Immutable view over the loaded configuration dict.
 
@@ -74,6 +93,7 @@ class ConfigSnapshot:
 
             defaults = await asyncio.to_thread(load_toml, dp)
             user_overrides = await backend.load()
+            user_overrides = _apply_legacy_cache_overrides(user_overrides)
             self._data = _deep_merge(defaults, user_overrides)
             self._data = _apply_env(self._data)
 

@@ -31,7 +31,8 @@ from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
 from app.products.openai.chat import (
     _stream_chat, _extract_message, _resolve_image,
     _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception,
-    _configured_retry_codes, _should_retry_upstream,
+    _adapter_has_visible_output, _configured_retry_codes,
+    _empty_upstream_response_error, _should_retry_upstream, _StreamStartGate,
 )
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai._tool_sieve import ToolSieve
@@ -345,11 +346,12 @@ async def create(
             tool_output_tokens    = 0
             block_index           = 0  # tracks next content_block index
             collected_annotations: list[dict] = []
+            gate                  = _StreamStartGate()
 
             try:
                 try:
                     # message_start
-                    yield _sse("message_start", {
+                    for out in gate.emit(_sse("message_start", {
                         "type": "message_start",
                         "message": {
                             "id":          msg_id,
@@ -360,8 +362,10 @@ async def create(
                             "stop_reason": None,
                             "usage":       {"input_tokens": estimate_prompt_tokens(internal_message), "output_tokens": 0},
                         },
-                    })
-                    yield _sse("ping", {"type": "ping"})
+                    })):
+                        yield out
+                    for out in gate.emit(_sse("ping", {"type": "ping"})):
+                        yield out
 
                     ended = False
                     async for line in _stream_chat(
@@ -385,35 +389,38 @@ async def create(
                             if ev.kind == "thinking" and emit_think and not think_closed:
                                 if not think_started:
                                     think_started = True
-                                    yield _sse("content_block_start", {
+                                    for out in gate.emit(_sse("content_block_start", {
                                         "type":          "content_block_start",
                                         "index":         block_index,
                                         "content_block": {"type": "thinking", "thinking": ""},
-                                    })
+                                    })):
+                                        yield out
                                 think_buf.append(ev.content)
-                                yield _sse("content_block_delta", {
+                                for out in gate.emit(_sse("content_block_delta", {
                                     "type":  "content_block_delta",
                                     "index": block_index,
                                     "delta": {"type": "thinking_delta", "thinking": ev.content},
-                                })
+                                })):
+                                    yield out
 
                             elif ev.kind == "text":
                                 # Close thinking block if open
                                 if think_started and not think_closed:
                                     think_closed = True
-                                    yield _sse("content_block_stop", {
+                                    for out in gate.emit(_sse("content_block_stop", {
                                         "type":  "content_block_stop",
                                         "index": block_index,
-                                    })
+                                    })):
+                                        yield out
                                     block_index += 1
 
                                 # Feed through ToolSieve if tools active
                                 if sieve is not None:
                                     safe_text, calls = sieve.feed(ev.content)
-                                    if calls is not None:
+                                    if calls:
                                         # Emit tool_use blocks
                                         for call in calls:
-                                            yield _sse("content_block_start", {
+                                            for out in gate.emit(_sse("content_block_start", {
                                                 "type":  "content_block_start",
                                                 "index": block_index,
                                                 "content_block": {
@@ -422,19 +429,22 @@ async def create(
                                                     "name":  call.name,
                                                     "input": {},
                                                 },
-                                            })
-                                            yield _sse("content_block_delta", {
+                                            }), visible=True):
+                                                yield out
+                                            for out in gate.emit(_sse("content_block_delta", {
                                                 "type":  "content_block_delta",
                                                 "index": block_index,
                                                 "delta": {
                                                     "type":         "input_json_delta",
                                                     "partial_json": call.arguments,
                                                 },
-                                            })
-                                            yield _sse("content_block_stop", {
+                                            })):
+                                                yield out
+                                            for out in gate.emit(_sse("content_block_stop", {
                                                 "type":  "content_block_stop",
                                                 "index": block_index,
-                                            })
+                                            })):
+                                                yield out
                                             block_index += 1
                                         tool_output_tokens = estimate_tool_call_tokens(calls)
                                         tool_calls_emitted = True
@@ -447,17 +457,19 @@ async def create(
                                 if text_chunk:
                                     if not text_started:
                                         text_started = True
-                                        yield _sse("content_block_start", {
+                                        for out in gate.emit(_sse("content_block_start", {
                                             "type":          "content_block_start",
                                             "index":         block_index,
                                             "content_block": {"type": "text", "text": ""},
-                                        })
+                                        })):
+                                            yield out
                                     text_buf.append(text_chunk)
-                                    yield _sse("content_block_delta", {
+                                    for out in gate.emit(_sse("content_block_delta", {
                                         "type":  "content_block_delta",
                                         "index": block_index,
                                         "delta": {"type": "text_delta", "text": text_chunk},
-                                    })
+                                    }), visible=bool(text_chunk.strip())):
+                                        yield out
 
                             elif ev.kind == "annotation" and ev.annotation_data:
                                 collected_annotations.append(ev.annotation_data)
@@ -475,14 +487,15 @@ async def create(
                         if calls:
                             # Close text block if open
                             if text_started:
-                                yield _sse("content_block_stop", {
+                                for out in gate.emit(_sse("content_block_stop", {
                                     "type":  "content_block_stop",
                                     "index": block_index,
-                                })
+                                })):
+                                    yield out
                                 block_index += 1
                                 text_started = False
                             for call in calls:
-                                yield _sse("content_block_start", {
+                                for out in gate.emit(_sse("content_block_start", {
                                     "type":  "content_block_start",
                                     "index": block_index,
                                     "content_block": {
@@ -491,19 +504,22 @@ async def create(
                                         "name":  call.name,
                                         "input": {},
                                     },
-                                })
-                                yield _sse("content_block_delta", {
+                                }), visible=True):
+                                    yield out
+                                for out in gate.emit(_sse("content_block_delta", {
                                     "type":  "content_block_delta",
                                     "index": block_index,
                                     "delta": {
                                         "type":         "input_json_delta",
                                         "partial_json": call.arguments,
                                     },
-                                })
-                                yield _sse("content_block_stop", {
+                                })):
+                                    yield out
+                                for out in gate.emit(_sse("content_block_stop", {
                                     "type":  "content_block_stop",
                                     "index": block_index,
-                                })
+                                })):
+                                    yield out
                                 block_index += 1
                             tool_output_tokens = estimate_tool_call_tokens(calls)
                             tool_calls_emitted = True
@@ -514,13 +530,16 @@ async def create(
                         sources = adapter.search_sources_list()
                         if sources:
                             tool_delta["search_sources"] = sources
-                        yield _sse("message_delta", {
+                        for out in gate.emit(_sse("message_delta", {
                             "type":  "message_delta",
                             "delta": tool_delta,
                             "usage": {"output_tokens": tool_output_tokens},
-                        })
-                        yield _sse("message_stop", {"type": "message_stop"})
-                        yield "data: [DONE]\n\n"
+                        }), visible=True):
+                            yield out
+                        for out in gate.emit(_sse("message_stop", {"type": "message_stop"})):
+                            yield out
+                        for out in gate.emit("data: [DONE]\n\n"):
+                            yield out
                         success = True
                         logger.info("messages stream tool_calls: attempt={}/{} model={}",
                                     attempt + 1, max_retries + 1, model)
@@ -532,37 +551,43 @@ async def create(
                                 chunk = img_text + "\n"
                                 text_buf.append(chunk)
                                 if text_started:
-                                    yield _sse("content_block_delta", {
+                                    for out in gate.emit(_sse("content_block_delta", {
                                         "type":  "content_block_delta",
                                         "index": block_index,
                                         "delta": {"type": "text_delta", "text": chunk},
-                                    })
+                                    }), visible=bool(img_text.strip())):
+                                        yield out
 
                         references = adapter.references_suffix()
                         if references:
                             text_buf.append(references)
                             if text_started:
-                                yield _sse("content_block_delta", {
+                                for out in gate.emit(_sse("content_block_delta", {
                                     "type":  "content_block_delta",
                                     "index": block_index,
                                     "delta": {"type": "text_delta", "text": references},
-                                })
+                                }), visible=True):
+                                    yield out
 
                         # Close open blocks
                         if think_started and not think_closed:
-                            yield _sse("content_block_stop", {
+                            for out in gate.emit(_sse("content_block_stop", {
                                 "type":  "content_block_stop",
                                 "index": block_index,
-                            })
+                            })):
+                                yield out
                             block_index += 1
 
                         if text_started:
-                            yield _sse("content_block_stop", {
+                            for out in gate.emit(_sse("content_block_stop", {
                                 "type":  "content_block_stop",
                                 "index": block_index,
-                            })
+                            })):
+                                yield out
 
                         full_text  = "".join(text_buf)
+                        if not _adapter_has_visible_output(adapter, extra_text=full_text):
+                            raise _empty_upstream_response_error()
                         full_think = "".join(think_buf)
                         out_tokens = estimate_tokens(full_text)
                         if full_think:
@@ -575,13 +600,16 @@ async def create(
                             msg_delta["search_sources"] = sources
                         if collected_annotations:
                             msg_delta["annotations"] = collected_annotations
-                        yield _sse("message_delta", {
+                        for out in gate.emit(_sse("message_delta", {
                             "type":  "message_delta",
                             "delta": msg_delta,
                             "usage": {"output_tokens": out_tokens},
-                        })
-                        yield _sse("message_stop", {"type": "message_stop"})
-                        yield "data: [DONE]\n\n"
+                        }), visible=True):
+                            yield out
+                        for out in gate.emit(_sse("message_stop", {"type": "message_stop"})):
+                            yield out
+                        for out in gate.emit("data: [DONE]\n\n"):
+                            yield out
                         success = True
                         logger.info(
                             "messages stream completed: attempt={}/{} model={} text_len={} think_len={} images={}",
@@ -664,6 +692,8 @@ async def create(
                             break
                     if ended:
                         break
+                if not _adapter_has_visible_output(adapter):
+                    raise _empty_upstream_response_error()
                 success = True
 
             except UpstreamError as exc:

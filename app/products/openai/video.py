@@ -29,8 +29,10 @@ from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.storage import save_local_video
 from app.control.account.enums import FeedbackKind
+from app.control.account.runtime import get_refresh_service
 from app.control.model import registry as model_registry
 from app.control.model.registry import resolve as resolve_model
+from app.dataplane.account.selector import current_strategy
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
@@ -52,7 +54,16 @@ from ._format import (
     make_stream_chunk,
     make_thinking_chunk,
 )
-from .chat import _fail_sync, _quota_sync, _feedback_kind
+from .chat import (
+    EMPTY_UPSTREAM_BODY,
+    _configured_retry_codes,
+    _fail_sync,
+    _feedback_kind,
+    _log_task_exception,
+    _quota_sync,
+    _should_retry_upstream,
+)
+from app.products._account_selection import selection_max_retries
 
 _IMAGE_MEDIA_TYPE = "MEDIA_POST_TYPE_IMAGE"
 _VIDEO_MEDIA_TYPE = "MEDIA_POST_TYPE_VIDEO"
@@ -61,7 +72,23 @@ _VIDEO_QUALITY = "standard"
 _VIDEO_OBJECT = "video"
 _VIDEO_JOB_TTL_S = 3600
 _VIDEO_EXTENSION_REF_TYPE = "ORIGINAL_REF_TYPE_VIDEO_EXTENSION"
-_SUPPORTED_VIDEO_LENGTHS = frozenset({6, 10, 12, 16, 20})
+_VIDEO_MAX_REFERENCES = 7
+_VIDEO_ALLOWED_POOL_IDS = frozenset((1, 2))  # super / heavy only
+_SUPPORTED_VIDEO_LENGTHS = frozenset({6, 10, 12, 16, 20, 22, 26, 30, 32, 36, 40})
+_ASYNC_VIDEO_LENGTHS = frozenset({6, 10})
+_VIDEO_SEGMENT_LENGTHS: dict[int, list[int]] = {
+    6: [6],
+    10: [10],
+    12: [6, 6],
+    16: [10, 6],
+    20: [10, 10],
+    22: [10, 6, 6],
+    26: [10, 10, 6],
+    30: [10, 10, 10],
+    32: [10, 10, 6, 6],
+    36: [10, 10, 10, 6],
+    40: [10, 10, 10, 10],
+}
 _VIDEO_SIZE_MAP: dict[str, tuple[str, str]] = {
     "720x1280": ("9:16", "720p"),
     "1280x720": ("16:9", "720p"),
@@ -108,6 +135,7 @@ class _VideoJob:
     remixed_from_video_id: str | None = None
     video_url: str = ""
     content_path: str = ""
+    content_file_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -128,6 +156,11 @@ class _VideoJob:
             payload["error"] = self.error
         if self.remixed_from_video_id:
             payload["remixed_from_video_id"] = self.remixed_from_video_id
+        if self.status == "completed":
+            if self.content_file_id:
+                payload["metadata"] = {"url": _local_video_url(self.content_file_id)}
+            elif self.content_path:
+                payload["metadata"] = {"url": _video_content_url(self.id)}
         return payload
 
 
@@ -137,6 +170,12 @@ _VIDEO_JOBS_LOCK = asyncio.Lock()
 
 def _build_message(prompt: str, preset: str) -> str:
     return f"{prompt} {_PRESET_FLAGS.get(preset, '--mode=custom')}".strip()
+
+
+def _video_content_url(video_id: str) -> str:
+    app_url = get_config().get_str("app.app_url", "").rstrip("/")
+    path = f"/v1/videos/{video_id}/content"
+    return f"{app_url}{path}" if app_url else path
 
 
 def _progress_reason(progress: int) -> str:
@@ -169,6 +208,16 @@ def validate_video_length(seconds: int) -> None:
         raise ValidationError(f"seconds must be one of [{allowed}]", param="seconds")
 
 
+def validate_async_video_length(seconds: int) -> None:
+    if seconds not in _ASYNC_VIDEO_LENGTHS:
+        allowed = ", ".join(str(item) for item in sorted(_ASYNC_VIDEO_LENGTHS))
+        raise ValidationError(
+            f"seconds must be one of [{allowed}] for /v1/videos; "
+            "use /v1/chat/completions for longer videos",
+            param="seconds",
+        )
+
+
 def _resolve_video_size(size: str) -> tuple[str, str]:
     normalized = (size or "720x1280").strip()
     config = _VIDEO_SIZE_MAP.get(normalized)
@@ -196,18 +245,60 @@ def _resolve_video_preset(value: str | None, *, default: str = "custom") -> str:
 
 
 def _build_segment_lengths(seconds: int) -> list[int]:
-    if seconds == 6:
-        return [6]
-    if seconds == 10:
-        return [10]
-    if seconds == 12:
-        return [6, 6]
-    if seconds == 16:
-        return [10, 6]
-    if seconds == 20:
-        return [10, 10]
+    segments = _VIDEO_SEGMENT_LENGTHS.get(seconds)
+    if segments is not None:
+        return list(segments)
     validate_video_length(seconds)
     raise AssertionError("unreachable")
+
+
+def _normalize_segment_prompts(
+    prompt: str,
+    segment_lengths: list[int],
+    segment_prompts: list[str] | None = None,
+    *,
+    strict: bool = False,
+) -> list[str]:
+    prompts = [p.strip() for p in (segment_prompts or [prompt]) if p and p.strip()]
+    if not prompts:
+        raise ValidationError("Video prompt cannot be empty", param="messages")
+    if strict and len(prompts) != len(segment_lengths):
+        raise ValidationError(
+            "Video generation requires exactly "
+            f"{len(segment_lengths)} prompt segment(s) for this duration",
+            param="messages",
+        )
+    if len(prompts) > len(segment_lengths):
+        raise ValidationError(
+            f"Video generation uses {len(segment_lengths)} prompt segment(s) for this duration",
+            param="messages",
+        )
+    while len(prompts) < len(segment_lengths):
+        prompts.append(prompts[-1])
+    return prompts
+
+
+def _video_pool_candidates(spec) -> tuple[int, ...]:
+    return tuple(
+        pool_id
+        for pool_id in spec.pool_candidates()
+        if pool_id in _VIDEO_ALLOWED_POOL_IDS
+    )
+
+
+def _empty_video_response_error() -> UpstreamError:
+    return UpstreamError(
+        "Video upstream returned empty response",
+        status=429,
+        body=EMPTY_UPSTREAM_BODY,
+    )
+
+
+def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamError:
+    if isinstance(exc, UpstreamError):
+        return exc
+    body = str(exc).replace("\n", "\\n")[:400]
+    return UpstreamError(f"{context}: {exc}", status=502, body=body)
 
 
 def _video_create_payload(
@@ -337,13 +428,18 @@ async def _stream_video_request(
     kwargs = build_session_kwargs(lease=lease)
 
     async with ResettableSession(**kwargs) as session:
-        response = await session.post(
-            CHAT,
-            headers=headers,
-            data=orjson.dumps(payload),
-            timeout=timeout_s,
-            stream=True,
-        )
+        try:
+            response = await session.post(
+                CHAT,
+                headers=headers,
+                data=orjson.dumps(payload),
+                timeout=timeout_s,
+                stream=True,
+            )
+        except Exception as exc:
+            raise _transport_upstream_error(
+                exc, context="Video transport failed"
+            ) from exc
         if response.status_code != 200:
             body = response.content.decode("utf-8", "replace")[:300]
             raise UpstreamError(
@@ -351,8 +447,13 @@ async def _stream_video_request(
                 status=response.status_code,
                 body=body,
             )
-        async for line in response.aiter_lines():
-            yield line
+        try:
+            async for line in response.aiter_lines():
+                yield line
+        except Exception as exc:
+            raise _transport_upstream_error(
+                exc, context="Video stream read failed"
+            ) from exc
 
 
 def _absolutize_video_url(url: str) -> str:
@@ -436,6 +537,12 @@ async def _prepare_video_references(
     input_references: list[dict[str, Any]],
 ) -> list[_VideoReference]:
     """Upload multiple video references concurrently and preserve order."""
+    if len(input_references) > _VIDEO_MAX_REFERENCES:
+        raise ValidationError(
+            f"Video generation supports at most {_VIDEO_MAX_REFERENCES} reference images",
+            param="input_reference",
+        )
+
     tasks = [
         _prepare_video_reference(token, ref)
         for ref in input_references
@@ -490,6 +597,7 @@ async def _collect_video_segment(
     final_thumbnail = ""
     video_post_id = ""
     stream_data_items: list[str] = []
+    saw_video_signal = False
 
     async for line in _stream_video_request(
         token,
@@ -511,6 +619,7 @@ async def _collect_video_segment(
 
         stream = _extract_streaming_video_response(obj)
         if stream:
+            saw_video_signal = True
             try:
                 progress = int(stream.get("progress") or 0)
             except (TypeError, ValueError):
@@ -537,6 +646,8 @@ async def _collect_video_segment(
                     final_thumbnail = _absolutize_video_url(thumbnail)
 
         attachments = _extract_model_response_file_attachments(obj)
+        if attachments:
+            saw_video_signal = True
         if attachments and not final_asset_id:
             final_asset_id = attachments[0]
 
@@ -549,6 +660,8 @@ async def _collect_video_segment(
             body="\n".join(stream_data_items),
         )
     if not final_url:
+        if not stream_data_items or not saw_video_signal:
+            raise _empty_video_response_error()
         raise UpstreamError(
             "Video generation returned no final video URL",
             body="\n".join(stream_data_items),
@@ -638,8 +751,11 @@ async def _generate_video_with_token(
     preset: str,
     timeout_s: float,
     input_references: list[dict[str, Any]] | None = None,
+    segment_prompts: list[str] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
+    segments = _build_segment_lengths(seconds)
+    prompts = _normalize_segment_prompts(prompt, segments, segment_prompts)
     references: list[_VideoReference] = []
     if input_references:
         references = await _prepare_video_references(token, input_references)
@@ -648,7 +764,7 @@ async def _generate_video_with_token(
         post = await create_media_post(
             token,
             media_type=_VIDEO_MEDIA_TYPE,
-            prompt=prompt,
+            prompt=prompts[0],
             referer="https://grok.com/imagine",
         )
         post_data = post.get("post")
@@ -658,16 +774,16 @@ async def _generate_video_with_token(
         if not parent_post_id:
             raise UpstreamError("Video create-post returned no post id")
 
-    segments = _build_segment_lengths(seconds)
     total_segments = len(segments)
     artifact: _VideoArtifact | None = None
     extend_post_id = parent_post_id
     elapsed_seconds = 0
 
     for index, segment_length in enumerate(segments):
+        segment_prompt = prompts[index]
         if index == 0:
             payload = _video_create_payload(
-                prompt=prompt,
+                prompt=segment_prompt,
                 parent_post_id=parent_post_id,
                 aspect_ratio=aspect_ratio,
                 resolution_name=resolution_name,
@@ -680,7 +796,7 @@ async def _generate_video_with_token(
             referer = "https://grok.com/imagine"
         else:
             payload = _video_extend_payload(
-                prompt=prompt,
+                prompt=segment_prompt,
                 parent_post_id=parent_post_id,
                 extend_post_id=extend_post_id,
                 aspect_ratio=aspect_ratio,
@@ -725,6 +841,7 @@ async def _run_video_generation(
     seconds: int,
     preset: str = "custom",
     input_references: list[dict[str, Any]] | None = None,
+    segment_prompts: list[str] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
     async def _runner(token: str, timeout_s: float) -> _VideoArtifact:
@@ -737,6 +854,7 @@ async def _run_video_generation(
             preset=preset,
             timeout_s=timeout_s,
             input_references=input_references,
+            segment_prompts=segment_prompts,
             progress_cb=progress_cb,
         )
 
@@ -753,44 +871,94 @@ async def _run_video_with_account(
     spec = resolve_model(model)
     if not spec.is_video():
         raise ValidationError(f"Model {model!r} is not a video model", param="model")
+    pool_candidates = _video_pool_candidates(spec)
+    if not pool_candidates:
+        raise RateLimitError("No super/heavy accounts available for video generation")
 
     from app.dataplane.account import _directory as _acct_dir
 
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
-    acct = await _acct_dir.reserve(
-        pool_candidates=spec.pool_candidates(),
-        mode_id=int(spec.mode_id),
-        now_s_override=now_s(),
-    )
-    if acct is None:
-        raise RateLimitError("No available accounts for video generation")
+    max_retries = selection_max_retries()
+    retry_codes = _configured_retry_codes(cfg)
+    excluded: list[str] = []
+    mode_id = int(spec.mode_id)
 
-    token = acct.token
-    success = False
-    fail_exc: BaseException | None = None
-    try:
-        artifact = await runner(token, timeout_s)
-        success = True
-        return artifact
-    except BaseException as exc:
-        fail_exc = exc
-        raise
-    finally:
-        await _acct_dir.release(acct)
-        kind = (
-            FeedbackKind.SUCCESS
-            if success
-            else _feedback_kind(fail_exc)
-            if fail_exc
-            else FeedbackKind.SERVER_ERROR
+    async def _reserve():
+        acct = await _acct_dir.reserve(
+            pool_candidates=pool_candidates,
+            mode_id=mode_id,
+            now_s_override=now_s(),
+            exclude_tokens=excluded or None,
         )
-        await _acct_dir.feedback(token, kind, int(spec.mode_id))
-        if success:
-            asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
-        else:
-            asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+        if acct is not None or current_strategy() == "random":
+            return acct
+        refresh_svc = get_refresh_service()
+        if refresh_svc is not None:
+            await refresh_svc.refresh_on_demand()
+            acct = await _acct_dir.reserve(
+                pool_candidates=pool_candidates,
+                mode_id=mode_id,
+                now_s_override=now_s(),
+                exclude_tokens=excluded or None,
+            )
+        return acct
+
+    for attempt in range(max_retries + 1):
+        acct = await _reserve()
+        if acct is None:
+            raise RateLimitError("No available super/heavy accounts for video generation")
+
+        token = acct.token
+        success = False
+        retry = False
+        fail_exc: BaseException | None = None
+        try:
+            artifact = await runner(token, timeout_s)
+            success = True
+            return artifact
+        except UpstreamError as exc:
+            fail_exc = exc
+            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                retry = True
+                logger.warning(
+                    "video retry scheduled: attempt={}/{} status={} token={}...",
+                    attempt + 1,
+                    max_retries,
+                    exc.status,
+                    token[:8],
+                )
+            else:
+                raise
+        except BaseException as exc:
+            fail_exc = exc
+            raise
+        finally:
+            await _acct_dir.release(acct)
+            kind = (
+                FeedbackKind.SUCCESS
+                if success
+                else _feedback_kind(fail_exc)
+                if fail_exc
+                else FeedbackKind.SERVER_ERROR
+            )
+            await _acct_dir.feedback(token, kind, mode_id)
+            if success:
+                asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(
+                    _log_task_exception
+                )
+            else:
+                asyncio.create_task(_fail_sync(token, mode_id, fail_exc)).add_done_callback(
+                    _log_task_exception
+                )
+
+        if retry:
+            excluded.append(token)
+            continue
+        break
+
+    raise RateLimitError("No available super/heavy accounts for video generation")
 
 
 async def _put_video_job(job: _VideoJob) -> None:
@@ -840,33 +1008,11 @@ async def _run_video_job(
             default=default_resolution_name,
         )
         resolved_preset = _resolve_video_preset(preset)
-        spec = resolve_model(job.model)
 
-        from app.dataplane.account import _directory as _acct_dir
+        async def _progress(progress: int) -> None:
+            await _set_job_status(job, status="in_progress", progress=max(1, progress))
 
-        if _acct_dir is None:
-            raise RateLimitError("Account directory not initialised")
-
-        acct = await _acct_dir.reserve(
-            pool_candidates=spec.pool_candidates(),
-            mode_id=int(spec.mode_id),
-            now_s_override=now_s(),
-        )
-        if acct is None:
-            raise RateLimitError("No available accounts for video generation")
-
-        token = acct.token
-        success = False
-        fail_exc: BaseException | None = None
-        try:
-            cfg = get_config()
-            timeout_s = cfg.get_float("video.timeout", 180.0)
-
-            async def _progress(progress: int) -> None:
-                await _set_job_status(
-                    job, status="in_progress", progress=max(1, progress)
-                )
-
+        async def _runner(token: str, timeout_s: float) -> tuple[_VideoArtifact, bytes]:
             artifact = await _generate_video_with_token(
                 token=token,
                 prompt=prompt,
@@ -879,32 +1025,19 @@ async def _run_video_job(
                 progress_cb=_progress,
             )
             raw, _mime = await _download_video_bytes(token, artifact.video_url)
-            success = True
-        except BaseException as exc:
-            fail_exc = exc
-            raise
-        finally:
-            await _acct_dir.release(acct)
-            kind = (
-                FeedbackKind.SUCCESS
-                if success
-                else _feedback_kind(fail_exc)
-                if fail_exc
-                else FeedbackKind.SERVER_ERROR
-            )
-            await _acct_dir.feedback(token, kind, int(spec.mode_id))
-            if success:
-                asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
-            else:
-                asyncio.create_task(_fail_sync(token, int(spec.mode_id), fail_exc))
+            return artifact, raw
 
-        path = _save_video_bytes(raw, job.id)
+        artifact, raw = await _run_video_with_account(model=job.model, runner=_runner)
+
+        file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
+        path = _save_video_bytes(raw, file_id)
         async with _VIDEO_JOBS_LOCK:
             job.status = "completed"
             job.progress = 100
             job.completed_at = int(time.time())
             job.video_url = artifact.video_url
             job.content_path = str(path)
+            job.content_file_id = file_id
             job.remixed_from_video_id = artifact.remixed_from_video_id
     except Exception as exc:
         logger.exception("video job failed: job_id={} error={}", job.id, exc)
@@ -932,7 +1065,7 @@ async def create_video(
         raise ValidationError("prompt cannot be empty", param="prompt")
 
     normalized_seconds = _coerce_seconds(seconds)
-    validate_video_length(normalized_seconds)
+    validate_async_video_length(normalized_seconds)
     normalized_size = (size or "720x1280").strip()
     _aspect_ratio, default_resolution_name = _resolve_video_size(normalized_size)
     _resolve_video_resolution_name(resolution_name, default=default_resolution_name)
@@ -992,52 +1125,68 @@ async def content_path(video_id: str) -> Path:
 def _extract_video_prompt_and_reference(
     messages: list[dict],
 ) -> tuple[str, list[dict[str, Any]] | None]:
-    prompt = ""
+    prompts, input_references = _extract_video_segment_prompts_and_references(messages)
+    return prompts[-1], input_references
+
+
+def _text_and_references_from_content(
+    content: str | list[dict[str, Any]] | None,
+) -> tuple[str, list[str]]:
+    if isinstance(content, str):
+        return content.strip(), []
+    if not isinstance(content, list):
+        return "", []
+
+    text_parts: list[str] = []
+    reference_urls: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                text_parts.append(text)
+        elif item_type == "image_url":
+            image_url = item.get("image_url")
+            if isinstance(image_url, dict):
+                url = str(image_url.get("url") or "").strip()
+                if url:
+                    reference_urls.append(url)
+            elif isinstance(image_url, str) and image_url.strip():
+                reference_urls.append(image_url.strip())
+    return " ".join(text_parts).strip(), reference_urls
+
+
+def _extract_video_segment_prompts_and_references(
+    messages: list[dict],
+) -> tuple[list[str], list[dict[str, Any]] | None]:
+    prompts: list[str] = []
     reference_urls: list[str] = []
 
-    for msg in reversed(messages):
-        content = msg.get("content", "")
-        if isinstance(content, str) and content.strip():
-            prompt = content.strip()
-            if prompt:
-                break
+    for msg in messages:
+        if msg.get("role", "user") != "user":
             continue
-        if not isinstance(content, list):
-            continue
-
-        text_parts: list[str] = []
-        block_references: list[str] = []
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            item_type = item.get("type")
-            if item_type == "text":
-                text = str(item.get("text") or "").strip()
-                if text:
-                    text_parts.append(text)
-            elif item_type == "image_url":
-                image_url = item.get("image_url")
-                if isinstance(image_url, dict):
-                    url = str(image_url.get("url") or "").strip()
-                    if url:
-                        block_references.append(url)
-                elif isinstance(image_url, str) and image_url.strip():
-                    block_references.append(image_url.strip())
-
-        if text_parts:
-            prompt = " ".join(text_parts)
+        prompt, block_references = _text_and_references_from_content(
+            msg.get("content", "")
+        )
+        if prompt:
+            prompts.append(prompt)
         if block_references and not reference_urls:
             reference_urls = block_references
-        if prompt:
-            break
 
-    if not prompt:
+    if not prompts:
         raise ValidationError("Video prompt cannot be empty", param="messages")
 
     input_references: list[dict[str, Any]] | None = None
     if reference_urls:
-        input_references = [{"image_url": url} for url in reference_urls[:7]]
-    return prompt, input_references
+        if len(reference_urls) > _VIDEO_MAX_REFERENCES:
+            raise ValidationError(
+                f"Video generation supports at most {_VIDEO_MAX_REFERENCES} reference images",
+                param="messages",
+            )
+        input_references = [{"image_url": url} for url in reference_urls]
+    return prompts, input_references
 
 
 async def completions(
@@ -1058,7 +1207,17 @@ async def completions(
         default=default_resolution_name,
     )
     resolved_preset = _resolve_video_preset(preset)
-    prompt, input_references = _extract_video_prompt_and_reference(messages)
+    segments = _build_segment_lengths(seconds)
+    segment_prompts, input_references = _extract_video_segment_prompts_and_references(
+        messages
+    )
+    normalized_segment_prompts = _normalize_segment_prompts(
+        segment_prompts[0],
+        segments,
+        segment_prompts,
+        strict=True,
+    )
+    prompt = normalized_segment_prompts[0]
 
     cfg = get_config()
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", False)
@@ -1075,6 +1234,7 @@ async def completions(
                 preset=resolved_preset,
                 timeout_s=timeout_s,
                 input_references=input_references,
+                segment_prompts=normalized_segment_prompts,
                 progress_cb=progress_cb,
             )
             file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
@@ -1140,7 +1300,12 @@ __all__ = [
     "retrieve",
     "content_path",
     "validate_video_length",
+    "validate_async_video_length",
     "completions",
     "_build_segment_lengths",
+    "_empty_video_response_error",
+    "_extract_video_segment_prompts_and_references",
+    "_normalize_segment_prompts",
     "_resolve_video_size",
+    "_video_pool_candidates",
 ]

@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from app.platform.errors import UpstreamError
 from app.platform.config.snapshot import get_config
@@ -127,16 +127,90 @@ class AccountRefreshService:
             return None
 
     # ------------------------------------------------------------------
+    # Subscription API fetch (account type + account_id)
+    # ------------------------------------------------------------------
+
+    async def _fetch_subscription(self, token: str):
+        """Fetch subscription info (account type + xaiUserId) for *token*."""
+        try:
+            from app.dataplane.reverse.protocol.xai_subscription import (
+                fetch_subscription,
+            )
+            return await fetch_subscription(token)
+        except UpstreamError:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "subscription fetch failed: token={}... error={}",
+                token[:10], exc,
+            )
+            return None
+
+    async def _refresh_subscription(self, record: AccountRecord) -> None:
+        """Fetch subscription info, persist account_id, and store tier hint for Phase 2.
+
+        Does NOT set pool — that's Phase 2's job (multi-factor: rate-limits + subscription).
+        Stores ``sub_tier`` and ``sub_active`` in ext so _refresh_one can cross-validate.
+        """
+        if record.is_deleted():
+            return
+        try:
+            info = await self._fetch_subscription(record.token)
+        except UpstreamError as exc:
+            if await self._expire_invalid_credentials(record, exc):
+                return
+            raise
+        except Exception:
+            return
+
+        if info is None:
+            return
+
+        from .commands import AccountPatch
+
+        patch_fields: dict[str, Any] = {}
+        ext_merge: dict[str, Any] = {
+            "sub_tier": info.tier,
+            "sub_active": info.is_active,
+        }
+
+        if info.xai_user_id and not record.account_id:
+            patch_fields["account_id"] = info.xai_user_id
+
+        if patch_fields or ext_merge:
+            patch_fields["ext_merge"] = ext_merge
+            await self._repo.patch_accounts([
+                AccountPatch(token=record.token, **patch_fields)
+            ])
+            logger.info(
+                "subscription info updated: token={}... account_id={} tier={} active={}",
+                record.token[:10],
+                info.xai_user_id or record.account_id,
+                info.tier, info.is_active,
+            )
+
+    # ------------------------------------------------------------------
     # Core refresh logic
     # ------------------------------------------------------------------
 
     async def refresh_on_import(self, tokens: list[str]) -> RefreshResult:
-        """Called after bulk import — sync real quotas for all accounts."""
+        """Called after bulk import — sync real quotas and subscription info for all accounts."""
         records = await self._repo.get_accounts(tokens)
         active = [r for r in records if is_manageable(r)]
         if not active:
             return RefreshResult(checked=len(records))
 
+        # Phase 1: Fetch subscription info (account_id + tier) for accounts missing it.
+        sub_results = await run_batch(
+            [r for r in active if not r.account_id],
+            lambda r: self._refresh_subscription(r),
+            concurrency=get_config("account.refresh.usage_concurrency", 50),
+        )
+        # Refresh the records after subscription updates.
+        records = await self._repo.get_accounts(tokens)
+        active = [r for r in records if is_manageable(r)]
+
+        # Phase 2: Fetch quota windows.
         concurrency = get_config("account.refresh.usage_concurrency", 50)
         results = await run_batch(
             active,
@@ -145,7 +219,8 @@ class AccountRefreshService:
         )
         agg = RefreshResult(checked=len(records))
         for r in results:
-            agg.merge(r)
+            if r:
+                agg.merge(r)
         return agg
 
     async def refresh_call_async(self, token: str, mode_id: int) -> None:
@@ -236,8 +311,11 @@ class AccountRefreshService:
         if record.is_deleted():
             return RefreshResult()
 
+        # For basic accounts, fetch all modes (like "auto" pool) so infer_pool
+        # can see auto.total and correctly upgrade to super/heavy when warranted.
+        fetch_pool = "auto" if record.pool == "basic" else record.pool
         try:
-            windows = await self._fetch_all_quotas(record.token, record.pool)
+            windows = await self._fetch_all_quotas(record.token, fetch_pool)
         except UpstreamError as exc:
             if await self._expire_invalid_credentials(record, exc):
                 return RefreshResult(checked=1, expired=1, failed=0)
@@ -256,10 +334,17 @@ class AccountRefreshService:
         patches: dict[str, dict] = {}
         refreshed = False
 
+        # Use the inferred pool for quota normalization when it represents
+        # an upgrade (e.g. basic→super).  Without this, auto/expert/grok_4_3
+        # quota data fetched for basic accounts gets discarded by
+        # normalize_quota_window (basic pool doesn't support those modes).
+        inferred = infer_pool(windows)  # type: ignore[arg-type]
+        effective_pool = inferred if inferred != "basic" else record.pool
+
         for mode in ALL_MODES_FULL:
             mode_id = int(mode)
             if mode_id in windows:
-                window = normalize_quota_window(record.pool, mode_id, windows[mode_id])
+                window = normalize_quota_window(effective_pool, mode_id, windows[mode_id])
                 if window is None:
                     continue
                 patches[_MODE_KEYS[mode_id]] = window.to_dict()
@@ -293,12 +378,38 @@ class AccountRefreshService:
         if not patches:
             return RefreshResult(checked=1, failed=0 if refreshed else 1)
 
-        # Infer pool type from live quota data and patch if it changed.
-        inferred = infer_pool(windows)  # type: ignore[arg-type]
+        # ── Multi-factor pool inference ──────────────────────────────
+        # 'inferred' was set above from rate-limits auto.total (primary).
+        # Now cross-validate with subscription data (fallback).
+        #
+        # Scenarios handled:
+        #   auto=50, any sub status        → super   (rate-limits wins)
+        #   auto=7,  INACTIVE sub          → basic   (genuinely downgraded)
+        #   auto=?,  ACTIVE sub            → super   (subscription wins, API fluke)
+        #   auto=7,  ACTIVE sub (anomaly)  → super   (active sub > anomalous quota)
+        if inferred == "basic":
+            sub_tier   = record.ext.get("sub_tier", "")
+            sub_active = record.ext.get("sub_active", False)
+            if sub_active and sub_tier in (
+                "SUBSCRIPTION_TIER_GROK_PRO",
+                "SUBSCRIPTION_TIER_SUPER_GROK",
+                "SUBSCRIPTION_TIER_SUPER_GROK_PRO",
+                "SUBSCRIPTION_TIER_GROK_PRO_HEAVY",
+                "SUBSCRIPTION_TIER_SUPER_GROK_LITE",
+                "SUBSCRIPTION_TIER_GROK_TEAMS",
+            ):
+                from app.dataplane.reverse.protocol.xai_subscription import tier_to_pool as _t2p
+                inferred = _t2p(sub_tier)
+                logger.info(
+                    "account pool upgraded by subscription: token={}... "
+                    "rate_limits_pool=basic subscription_tier={} -> pool={}",
+                    record.token[:10], sub_tier, inferred,
+                )
+
         pool_patch = inferred if inferred != record.pool else None
         if pool_patch:
             logger.info(
-                "account pool updated from live quota: token={}... previous_pool={} current_pool={}",
+                "account pool updated: token={}... previous_pool={} current_pool={}",
                 record.token[:10],
                 record.pool,
                 inferred,

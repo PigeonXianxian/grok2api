@@ -111,7 +111,7 @@ docker compose up -d
 
 ### Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,LOG_DIR,ACCOUNT_STORAGE,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/chenyme/grok2api&env=LOG_LEVEL,LOG_FILE_ENABLED,DATA_DIR,LOG_DIR,ACCOUNT_STORAGE,ACCOUNT_REDIS_URL,ACCOUNT_MYSQL_URL,ACCOUNT_POSTGRESQL_URL,CONFIG_STORAGE,CONFIG_LOCAL_PATH)
 
 ### Render
 
@@ -186,7 +186,8 @@ docker compose up -d
 | `ACCOUNT_SQL_MAX_OVERFLOW` | Maximum overflow connections above pool size | `10` |
 | `ACCOUNT_SQL_POOL_TIMEOUT` | Seconds to wait for a free connection from the pool | `30` |
 | `ACCOUNT_SQL_POOL_RECYCLE` | Max connection lifetime in seconds before reconnect | `1800` |
-| `CONFIG_LOCAL_PATH` | Runtime config file path for `local` config storage | `${DATA_DIR}/config.toml` |
+| `CONFIG_STORAGE` | Runtime config storage backend; defaults to local TOML and does not follow `ACCOUNT_STORAGE` | `local` |
+| `CONFIG_LOCAL_PATH` | Local runtime config file path | `${DATA_DIR}/config.toml` |
 
 Runtime config can also be overridden with `GROK_`-prefixed environment variables. For example, `GROK_APP_API_KEY` overrides `app.api_key`, and `GROK_FEATURES_STREAM` overrides `features.stream`.
 
@@ -361,15 +362,31 @@ curl http://localhost:8000/v1/chat/completions \
     "model": "grok-imagine-video",
     "stream": true,
     "messages": [
-      {"role":"user","content":"A neon rainy street at night, cinematic slow tracking shot"}
+      {"role":"user","content":"A neon rainy street at night, cinematic slow tracking shot"},
+      {"role":"user","content":"The camera passes under glowing signs as the character turns toward distant headlights"}
     ],
-    "video_config": {
-      "seconds": 10,
-      "size": "1792x1024",
-      "resolution_name": "720p",
-      "preset": "normal"
+    "metadata": {
+      "video_config": {
+        "seconds": 16,
+        "size": "1792x1024",
+        "resolution_name": "720p",
+        "preset": "normal"
+      }
     }
   }'
+```
+
+`image_config` / `video_config` may also be sent at the request top level; top-level fields take precedence over matching `metadata` fields.
+
+```json
+{
+  "video_config": {
+    "seconds": 10,
+    "size": "1792x1024",
+    "resolution_name": "720p",
+    "preset": "normal"
+  }
+}
 ```
 
 <details>
@@ -389,10 +406,11 @@ curl http://localhost:8000/v1/chat/completions \
 | \|_ `size` | `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
 | \|_ `response_format` | `url`, `b64_json` |
 | `video_config` | Video model parameters |
-| \|_ `seconds` | `6`, `10`, `12`, `16`, `20` |
+| \|_ `seconds` | `6`, `10`, `12`, `16`, `20`, `22`, `26`, `30`, `32`, `36`, `40`; longer videos require one user prompt per segment |
 | \|_ `size` | `720x1280`, `1280x720`, `1024x1024`, `1024x1792`, `1792x1024` |
 | \|_ `resolution_name` | `480p`, `720p` |
 | \|_ `preset` | `fun`, `normal`, `spicy`, `custom` |
+| `metadata.image_config` / `metadata.video_config` | Compatibility location for `image_config` / `video_config`; top-level config wins |
 
 <br>
 </details>
@@ -588,7 +606,7 @@ curl -L http://localhost:8000/v1/videos/<video_id>/content \
 | :-- | :-- |
 | `model` | Video model, currently `grok-imagine-video` |
 | `prompt` | Video generation prompt |
-| `seconds` | Video length: `6`, `10`, `12`, `16`, `20` |
+| `seconds` | Video length: `6`, `10`; use `/v1/chat/completions` for longer videos |
 | `size` | Supports `720x1280`, `1280x720`, `1024x1024`, `1024x1792`, `1792x1024` |
 | `resolution_name` | `480p` or `720p` |
 | `preset` | `fun`, `normal`, `spicy`, `custom` |

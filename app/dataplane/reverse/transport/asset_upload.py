@@ -184,7 +184,7 @@ async def upload_from_input(token: str, file_input: str) -> tuple[str, str]:
     if _is_url(file_input):
         # Fetch the remote URL and re-upload as base64.
         proxy = await get_proxy_runtime()
-        lease = await proxy.acquire()
+        lease = await proxy.acquire(resource=True)
         try:
             headers = build_http_headers(token, lease=lease)
             kwargs  = build_session_kwargs(lease=lease)

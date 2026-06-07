@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          
+
       # 针对 PR：使用原生逻辑
       - name: Setup PR commits & Run Gitleaks
         if: github.event_name == 'pull_request'
@@ -29,7 +29,7 @@ jobs:
           git remote add pr-head "https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git"
           git fetch --no-tags --prune --depth=1 pr-head \
             "+${{ github.event.pull_request.head.sha }}:refs/remotes/pr-head/current"
-            
+
           docker run --rm \
             -v "$PWD:/repo" \
             -w /repo \

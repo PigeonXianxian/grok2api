@@ -228,12 +228,8 @@ class ProxyDirectory:
         if self._egress_mode == EgressMode.DIRECT:
             return None
         async with self._lock:
-            # Prefer resource-specific nodes when available; fall back to base nodes.
-            nodes = (
-                self._resource_nodes
-                if resource and self._resource_nodes
-                else self._nodes
-            )
+            # Resource downloads are direct unless a resource proxy is explicit.
+            nodes = self._resource_nodes if resource else self._nodes
             if not nodes:
                 return None
             if self._egress_mode == EgressMode.SINGLE_PROXY:
