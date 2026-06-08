@@ -273,6 +273,72 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
     return f"data:{mime};base64,{blob_b64}"
 
 
+# ── Grok CLI OAuth 路由处理 ──────────────────────────────────────────
+
+
+async def _handle_grokcli(
+    req: ChatCompletionRequest,
+    messages: list[dict],
+    is_stream: bool,
+) -> dict | AsyncGenerator[str, None]:
+    """将 grokcli/ 模型请求路由到 xAI OAuth API。"""
+    from app.products.openai.grokcli_routing import (
+        acquire_grokcli_account, release_grokcli_account,
+        strip_grokcli_prefix,
+    )
+    from app.products.openai.chat import (
+        completions as _chat_completions,
+        _extract_message,
+    )
+
+    client, token_str, email = await acquire_grokcli_account()
+    success = False
+
+    try:
+        # 去掉 grokcli/ 前缀
+        xai_model = strip_grokcli_prefix(req.model)
+
+        # 构造 xAI Responses API 的 payload
+        message_text, _files = _extract_message(messages)
+        payload = {
+            "model": xai_model,
+            "input": message_text,
+            "stream": is_stream,
+        }
+
+        # 添加 reasoning（如果有 thinking 配置）
+        from app.platform.config.snapshot import get_config
+        cfg = get_config()
+        if cfg.get_bool("features.thinking", True):
+            payload["reasoning"] = {"effort": "medium"}
+
+        # 添加 tools
+        if req.tools:
+            payload["tools"] = [t.model_dump(exclude_none=True) for t in req.tools]
+        if req.tool_choice:
+            payload["tool_choice"] = req.tool_choice
+
+        if is_stream:
+            async def _grokcli_stream() -> AsyncGenerator[str, None]:
+                async for line in client.chat_stream(payload, timeout_s=cfg.get_float("chat.timeout", 120.0)):
+                    if line.startswith("data:"):
+                        yield f"{line}\n\n"
+                yield "data: [DONE]\n\n"
+
+            success = True
+            return _grokcli_stream()
+        else:
+            resp = await client.chat(payload, timeout_s=cfg.get_float("chat.timeout", 120.0))
+            success = True
+            return resp
+
+    except Exception:
+        success = False
+        raise
+    finally:
+        await release_grokcli_account(token_str, success)
+
+
 @router.post(
     "/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)]
 )
@@ -295,8 +361,11 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
     try:
+        # ── Grok CLI (OAuth) routing ─────────────────────────────────────
+        if req.model.startswith("grokcli/"):
+            result = await _handle_grokcli(req, messages, is_stream)
         # Dispatch by model capability.
-        if spec.is_image_edit():
+        elif spec.is_image_edit():
             from .images import edit as img_edit
 
             cfg = _resolve_image_config(req)
