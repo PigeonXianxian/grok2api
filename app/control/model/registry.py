@@ -53,6 +53,20 @@ MODELS: tuple[ModelSpec, ...] = (
 
     # Super+
     ModelSpec("grok-imagine-video",                     ModeId.AUTO,     Tier.SUPER, Capability.VIDEO,      True, "Grok Imagine Video"),
+
+    # === Grok CLI (OAuth, api.x.ai) ==========================================
+    # 通过 xAI OAuth token 调用官方 api.x.ai，无需 Cloudflare 反爬
+    # 模型名以 grokcli/ 为前缀，走独立的 OAuth 认证和 api.x.ai 端点
+
+    # Chat
+    ModelSpec("grokcli/grok-3",                         ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 3"),
+    ModelSpec("grokcli/grok-3-reasoning",               ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 3 Reasoning"),
+    ModelSpec("grokcli/grok-4.1-non-thinking-w-tool",   ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 4.1 Non-Thinking"),
+    ModelSpec("grokcli/grok-4.1-reasoning",             ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 4.1 Reasoning"),
+    # Image
+    ModelSpec("grokcli/grok-imagine-image",             ModeId.AUTO,     Tier.SUPER, Capability.IMAGE,      True, "Grok CLI Imagine Image"),
+    # Video
+    ModelSpec("grokcli/grok-imagine-video",             ModeId.AUTO,     Tier.SUPER, Capability.VIDEO,      True, "Grok CLI Imagine Video"),
 )
 # fmt: on
 

@@ -413,6 +413,13 @@ def create_app() -> FastAPI:
     app.include_router(openai_router)
     app.include_router(anthropic_router)
 
+    # xAI OAuth 回调（无认证，浏览器重定向用）
+    try:
+        from app.products.web.admin.xai_oauth import public_router as _xai_public_router
+        app.include_router(_xai_public_router, prefix="/admin/api")
+    except Exception:
+        pass
+
     # Static assets — new statics only.
     _statics_dir = Path(__file__).resolve().parent / "statics"
     if _statics_dir.is_dir():
