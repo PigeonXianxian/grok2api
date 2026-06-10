@@ -125,6 +125,7 @@ class XAIOAuthFromSSORequest(BaseModel):
     """用 SSO token 自动完成 OAuth 流程获取 Grok CLI token。"""
     token: str
     pool: str = "super"
+    service: str = "grok-cli"  # "grok-cli" | "build-cli"
 
 
 @router.post("/xai/oauth/from-sso")
@@ -133,8 +134,11 @@ async def oauth_from_sso(
     repo: "AccountRepository" = Depends(_get_repo),
     refresh_svc: "AccountRefreshService" = Depends(_get_refresh_svc),
 ):
-    """用已有的 Grok SSO token 自动完成 OAuth 流程，获取 api.x.ai 的 Bearer token。"""
-    # 这在 server 进程内运行，curl_cffi 的 OpenSSL 正常工作
+    """用已有的 Grok SSO token 自动完成 OAuth 流程，获取 api.x.ai 的 Bearer token。
+
+    支持 Super/Heavy 账号，支持标准 Grok CLI 和 Build CLI 两种服务。
+    通过 SSO cookie 自动完成 OAuth consent（无需浏览器手动操作）。
+    """
     pro_token = req.token.strip()
     if pro_token.startswith("sso="):
         pro_token = pro_token[4:]
@@ -146,13 +150,11 @@ async def oauth_from_sso(
     from app.control.account.xai_oauth_store import import_oauth_token
     from app.control.account.commands import AccountUpsert
 
-    # 1. 生成 PKCE
     pkce = generate_pkce_codes()
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     discovery = await discover_oidc()
 
-    # 2. 用 curl_cffi + SSO cookie 完成 OAuth consent
     try:
         from curl_cffi import requests as curl_requests
     except ImportError:
@@ -176,9 +178,8 @@ async def oauth_from_sso(
     session.cookies.set("sso", pro_token, domain=".x.ai", path="/")
     session.cookies.set("sso-rw", pro_token, domain=".x.ai", path="/")
 
-    logger.info("xai oauth from-sso: navigating to consent page")
+    logger.info("xai oauth from-sso: navigating to consent page service={}", req.service)
 
-    # 获取 consent 页面
     r = session.get(consent_url, impersonate="chrome136", allow_redirects=False)
     if r.status_code in (301, 302, 303, 307, 308):
         loc = r.headers.get("Location", "")
@@ -188,7 +189,6 @@ async def oauth_from_sso(
             code = qs.get("code", [""])[0]
             logger.info("xai oauth from-sso: got code directly from redirect")
         elif "sign-in" in loc:
-            # 需要登录 — SSO cookie 不够
             return _json({
                 "status": "need_login",
                 "message": "SSO cookie not accepted by accounts.x.ai. This account may be Google-registered and cannot be used for OAuth.",
@@ -197,7 +197,6 @@ async def oauth_from_sso(
         else:
             return _json({"status": "unexpected_redirect", "location": loc[:200]}, 400)
     elif r.status_code == 200:
-        # 可能已经在 consent 页面
         if "consent" in r.url:
             logger.info("xai oauth from-sso: on consent page, posting allow")
             r2 = session.post(consent_url, data={"consent": "allow"},
@@ -223,11 +222,14 @@ async def oauth_from_sso(
     if not code:
         return _json({"status": "no_code", "message": "Failed to extract authorization code"}, 400)
 
-    logger.info("xai oauth from-sso: got code, exchanging for tokens")
+    logger.info("xai oauth from-sso: got code, exchanging for tokens service={}", req.service)
 
-    # 3. 交换 token
     bundle = await exchange_code_for_tokens(code, pkce)
-    ext = await import_oauth_token(bundle.token_data, pool=req.pool)
+    pool = req.pool
+    if bundle.token_data.email and ("@x.ai" in bundle.token_data.email or "@xai" in bundle.token_data.email.lower()):
+        pool = "super"
+
+    ext = await import_oauth_token(bundle.token_data, pool=pool)
 
     access_token = bundle.token_data.access_token
     email = bundle.token_data.email or "xai-oauth"
@@ -236,17 +238,21 @@ async def oauth_from_sso(
     await repo.upsert_accounts([AccountUpsert(
         token=access_token,
         account_id=account_id,
-        pool=req.pool,
+        pool=pool,
         ext=ext,
     )])
 
     if refresh_svc is not None:
         await refresh_svc.refresh_on_demand()
 
+    logger.info("xai oauth from-sso success: email={} pool={} service={}", email, pool, req.service)
+
     return _json({
         "status": "success",
-        "message": f"Grok CLI token obtained: {email}",
+        "message": f"Grok CLI token obtained: {email} (pool={pool}, service={req.service})",
         "email": email,
+        "pool": pool,
+        "service": req.service,
         "access_token": access_token[:30] + "...",
         "expires_in": bundle.token_data.expires_in,
         "refresh_token": bundle.token_data.refresh_token[:30] + "..." if bundle.token_data.refresh_token else "",

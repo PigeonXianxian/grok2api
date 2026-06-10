@@ -92,14 +92,22 @@ mode = "none"
 cf_cookies = ""
 # User-Agent（需与 cf_cookies 匹配）
 user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
-# curl_cffi 浏览器指纹
-browser = "chrome136"
+# curl_cffi 浏览器指纹（为空时启用轮换：chrome120/chrome131/firefox120/edge101）
+browser = ""
 # FlareSolverr 服务地址
 flaresolverr_url = ""
 # 挑战等待超时（秒）
 timeout_sec = 60
 # Clearance 刷新间隔（秒）
 refresh_interval = 3600
+# 挑战解决方案缓存 TTL（秒，0=禁用缓存）
+cache_ttl_sec = 1800
+# 挑战失败后冷却基础时间（秒）
+cooldown_base_sec = 10
+# 挑战失败后冷却最大时间（秒）
+cooldown_max_sec = 300
+# 冷却时间退避倍数
+cooldown_multiplier = 2.0
 
 
 # ==================== 重试策略 ====================

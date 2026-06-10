@@ -1,12 +1,34 @@
-"""Shared Cloudflare proxy profile resolution."""
+"""Shared Cloudflare proxy profile resolution.
+
+Supports browser fingerprint rotation to reduce CF detection:
+  - Periodically rotates curl_cffi impersonation profiles
+  - Rotation interval is configurable (default 300s per profile)
+  - Hardcoded profile pool: chrome120, chrome131, firefox120, edge101
+"""
 
 from dataclasses import dataclass
 from functools import lru_cache
 import re
+import time
 from typing import get_args
 
 from app.control.proxy.config import resolve_clearance_config
 from app.control.proxy.models import ProxyLease
+
+# Profile rotation pool — rotated every ROTATE_INTERVAL seconds
+_ROTATION_PROFILES = ("chrome120", "chrome131", "firefox120", "edge101")
+_ROTATE_INTERVAL = 300  # seconds per profile
+_rotation_start = time.time()
+
+
+def _rotated_profile() -> str:
+    """Return the current browser profile from the rotation pool."""
+    supported = _supported_browser_profiles()
+    candidates = [p for p in _ROTATION_PROFILES if not supported or p in supported]
+    if not candidates:
+        return "chrome120"
+    idx = int((time.time() - _rotation_start) // _ROTATE_INTERVAL) % len(candidates)
+    return candidates[idx]
 
 
 @dataclass(frozen=True)
@@ -100,7 +122,7 @@ def resolve_proxy_profile(lease: ProxyLease | None) -> ProxyProfile:
     browser = (
         browser_from_user_agent(user_agent)
         or _supported_browser(cfg.browser)
-        or "chrome120"
+        or _rotated_profile()
     )
 
     return ProxyProfile(

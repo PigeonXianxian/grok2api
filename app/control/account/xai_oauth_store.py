@@ -1,24 +1,27 @@
-"""xAI OAuth token 管理 — 与账号系统集成，支持自动刷新和月额度管理
+"""xAI OAuth token management — integrated with account system, auto-refresh and monthly quota.
 
-Token 存储在 AccountRecord 的 ext 字段中，通过 account_id 去重。
-每月自动刷新 OAuth token，自动更新配额信息。
+Tokens are stored in AccountRecord.ext fields, deduplicated via account_id.
+Monthly OAuth token refresh and quota sync.
 """
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 from typing import Any
 
-from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.dataplane.reverse.protocol.xai_oauth import (
     TokenStorage,
     refresh_access_token,
-    credential_filename,
     load_token_from_file,
-    save_token_to_file,
     DEFAULT_API_BASE,
+)
+from app.control.account.cli_quota import (
+    EXT_CLI_QUOTA_MONTHLY,
+    EXT_CLI_QUOTA_USED,
+    EXT_CLI_QUOTA_RESET,
+    init_cli_quota,
+    cli_quota_summary,
 )
 
 # ext 字段中的 key
@@ -39,9 +42,10 @@ async def import_oauth_token(
     token_storage: TokenStorage,
     pool: str = "super",
 ) -> dict[str, Any]:
-    """从 TokenStorage 创建 AccountRecord 的 ext 数据。
+    """Create AccountRecord ext data from TokenStorage.
 
-    用于在账号系统中注册新的 xAI OAuth token。
+    Registers a new xAI OAuth token in the account system with
+    monthly CLI quota initialisation.
     """
     ext = {
         EXT_KEY_TYPE: "xai_oauth",
@@ -52,10 +56,11 @@ async def import_oauth_token(
         EXT_KEY_BASE_URL: token_storage.base_url or DEFAULT_API_BASE,
         EXT_KEY_TOKEN_ENDPOINT: token_storage.token_endpoint,
         EXT_KEY_LAST_REFRESH: token_storage.last_refresh,
-        EXT_KEY_QUOTA_MONTHLY: 0,  # 待刷新
+        EXT_KEY_QUOTA_MONTHLY: 0,
         EXT_KEY_QUOTA_USED: 0,
         EXT_KEY_QUOTA_RESET: "",
     }
+    ext = init_cli_quota(ext)
     return ext
 
 
@@ -143,4 +148,8 @@ __all__ = [
     "import_oauth_from_file",
     "EXT_KEY_TYPE", "EXT_KEY_ACCESS_TOKEN", "EXT_KEY_REFRESH_TOKEN",
     "EXT_KEY_EXPIRE", "EXT_KEY_EMAIL", "EXT_KEY_BASE_URL",
+    "EXT_KEY_TOKEN_ENDPOINT", "EXT_KEY_LAST_REFRESH",
+    "EXT_KEY_QUOTA_MONTHLY", "EXT_KEY_QUOTA_USED", "EXT_KEY_QUOTA_RESET",
+    "EXT_CLI_QUOTA_MONTHLY", "EXT_CLI_QUOTA_USED", "EXT_CLI_QUOTA_RESET",
+    "cli_quota_summary",
 ]

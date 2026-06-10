@@ -58,11 +58,20 @@ MODELS: tuple[ModelSpec, ...] = (
     # 通过 xAI OAuth token 调用官方 api.x.ai，无需 Cloudflare 反爬
     # 模型名以 grokcli/ 为前缀，走独立的 OAuth 认证和 api.x.ai 端点
 
-    # Chat
+    # Chat — stable
     ModelSpec("grokcli/grok-3",                         ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 3"),
     ModelSpec("grokcli/grok-3-reasoning",               ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 3 Reasoning"),
     ModelSpec("grokcli/grok-4.1-non-thinking-w-tool",   ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 4.1 Non-Thinking"),
     ModelSpec("grokcli/grok-4.1-reasoning",             ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 4.1 Reasoning"),
+    # Chat — build CLI (from CPA model catalog)
+    ModelSpec("grokcli/grok-build-0.1",                 ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Build 0.1"),
+    ModelSpec("grokcli/grok-4.3",                       ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 4.3"),
+    ModelSpec("grokcli/grok-4.20-0309-reasoning",       ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok CLI 4.20 Reasoning"),
+    ModelSpec("grokcli/grok-4.20-0309-non-reasoning",   ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI 4.20 Non-Reasoning"),
+    ModelSpec("grokcli/grok-4.20-multi-agent-0309",     ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok CLI 4.20 Multi-Agent"),
+    ModelSpec("grokcli/grok-3-mini",                    ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 3 Mini"),
+    ModelSpec("grokcli/grok-3-mini-fast",               ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Grok 3 Mini Fast"),
+    ModelSpec("grokcli/grok-composer-2.5-fast",         ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok CLI Composer 2.5 Fast"),
     # Image
     ModelSpec("grokcli/grok-imagine-image",             ModeId.AUTO,     Tier.SUPER, Capability.IMAGE,      True, "Grok CLI Imagine Image"),
     # Video
