@@ -3,6 +3,12 @@
 Maintains the list of EgressNodes and ClearanceBundles.
 Selection delegates to the dataplane ProxyTable; this module owns
 configuration loading and clearance refresh lifecycle.
+
+Optimizations:
+  - Per-node challenge solution cache with TTL and disk persistence
+  - Exponential backoff cooldown after challenge failures per node
+  - Single-flight guard prevents concurrent FlareSolverr calls per node
+  - Build-then-swap refresh: old bundle stays valid during refresh
 """
 
 import asyncio
@@ -26,6 +32,7 @@ from .models import (
 )
 from .providers.manual import ManualClearanceProvider
 from .providers.flaresolverr import FlareSolverrClearanceProvider
+from .challenge_cache import get_challenge_cache
 
 _DEFAULT_CLEARANCE_ORIGIN = "https://grok.com"
 BundleKey = tuple[str, str]
@@ -181,12 +188,20 @@ class ProxyDirectory:
         )
 
     async def feedback(self, lease: ProxyLease, result: ProxyFeedback) -> None:
-        """Apply upstream feedback to the appropriate egress node."""
+        """Apply upstream feedback to the appropriate egress node.
+
+        On CHALLENGE / UNAUTHORIZED: invalidate clearance bundle and record
+        cooldown with exponential backoff to avoid hammering a blocked node.
+        """
+        proxy = lease.proxy_url or None
+        host = lease.clearance_host
+        cache = get_challenge_cache()
+
         if result.kind in (
             ProxyFeedbackKind.CHALLENGE,
             ProxyFeedbackKind.UNAUTHORIZED,
         ):
-            # Invalidate associated clearance bundle.
+            # Invalidate associated clearance bundle
             key = (lease.proxy_url or "direct", lease.clearance_host)
             async with self._lock:
                 from .models import ClearanceBundleState
@@ -196,10 +211,15 @@ class ProxyDirectory:
                     self._bundles[key] = bundle.model_copy(
                         update={"state": ClearanceBundleState.INVALID}
                     )
+            # Remove stale cache entry and record cooldown
+            cache.remove(proxy, host)
+            delay = cache.record_challenge_failure(proxy, host)
+            logger.info(
+                "cf challenge detected: proxy={} host={} cooldown_s={:.1f}",
+                proxy or "direct", host, delay,
+            )
 
-        # In PROXY_POOL mode, rotate to the next node on any failure so the
-        # next acquire() prefers a different egress rather than hammering the
-        # same broken node.
+        # In PROXY_POOL mode, rotate to the next node on any failure
         if (
             self._egress_mode == EgressMode.PROXY_POOL
             and lease.proxy_url
@@ -249,9 +269,37 @@ class ProxyDirectory:
             return None
         clearance_host = _clearance_host(clearance_origin)
         key: BundleKey = (affinity_key, clearance_host)
+        cache = get_challenge_cache()
+
+        # Cooldown guard: skip FlareSolverr if this node is in backoff
+        if cache.is_cooling(proxy_url or None, clearance_host):
+            logger.debug(
+                "cf clearance cooldown active: proxy={} host={}",
+                proxy_url or "direct", clearance_host,
+            )
+            async with self._lock:
+                bundle = self._bundles.get(key)
+                if bundle and bundle.state.value == 0:
+                    return bundle
+            return None
+
+        # Check challenge cache for a previously solved solution
+        if self._clearance_mode == ClearanceMode.FLARESOLVERR:
+            cached = cache.get(proxy_url or None, clearance_host)
+            if cached and cached.cookies:
+                logger.debug(
+                    "cf challenge cache hit: proxy={} host={}",
+                    proxy_url or "direct", clearance_host,
+                )
+                return ClearanceBundle(
+                    bundle_id=f"cached:{affinity_key}@{clearance_host}",
+                    cf_cookies=cached.cookies,
+                    user_agent=cached.user_agent,
+                    affinity_key=affinity_key,
+                    clearance_host=clearance_host,
+                )
 
         # Single-flight: only one coroutine fetches clearance per proxy+host key.
-        # Concurrent callers wait on the Event and retry once it fires.
         while True:
             async with self._lock:
                 bundle = self._bundles.get(key)
@@ -259,11 +307,9 @@ class ProxyDirectory:
                     return bundle
                 event = self._refresh_events.get(key)
                 if event is None:
-                    # This coroutine wins the right to refresh.
                     event = asyncio.Event()
                     self._refresh_events[key] = event
                     break
-            # Another coroutine is already refreshing — wait for it, then retry.
             await event.wait()
 
         try:
@@ -281,11 +327,19 @@ class ProxyDirectory:
             if bundle:
                 async with self._lock:
                     self._bundles[key] = bundle
+                # Cache the successful solution for reuse
+                cache.put(
+                    proxy_url=proxy_url or None,
+                    clearance_host=clearance_host,
+                    cookies=bundle.cf_cookies,
+                    user_agent=bundle.user_agent,
+                )
+                cache.record_challenge_success(proxy_url or None, clearance_host)
             return bundle
         finally:
             async with self._lock:
                 self._refresh_events.pop(key, None)
-            event.set()  # Wake all waiters so they retry with the new bundle.
+            event.set()
 
     # ------------------------------------------------------------------
     # Clearance lifecycle helpers (used by ProxyClearanceScheduler)

@@ -72,8 +72,16 @@ _CATEGORY_TO_PROXY: dict[ResultCategory, ProxyFeedbackKind] = {
 
 
 def build_proxy_feedback(result: ReverseResult) -> ProxyFeedback:
-    """Build a ProxyFeedback from a ReverseResult."""
+    """Build a ProxyFeedback from a ReverseResult.
+
+    FORBIDDEN maps to CHALLENGE only when the body indicates a real
+    Cloudflare challenge page (is_cloudflare=True). Generic 403
+    permission errors are treated as FORBIDDEN without clearance
+    invalidation.
+    """
     kind = _CATEGORY_TO_PROXY.get(result.category, ProxyFeedbackKind.TRANSPORT_ERROR)
+    if result.category == ResultCategory.FORBIDDEN and not result.is_cloudflare:
+        kind = ProxyFeedbackKind.FORBIDDEN
     return ProxyFeedback(
         kind=kind,
         status_code=result.status_code,

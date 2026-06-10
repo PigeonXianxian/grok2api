@@ -69,6 +69,7 @@ class ReverseResult:
     payload:     Any          = None    # parsed response data (dict / list / None)
     error:       str          = ""
     latency_ms:  int          = 0
+    is_cloudflare: bool       = False   # True when body matches CF challenge page
 
 
 __all__ = [

@@ -121,12 +121,17 @@ async def _execute_transport(
             payload=raw,
         )
     except UpstreamError as exc:
-        category = classify_result(exc.status, exc.details.get("body", ""))
+        body = exc.details.get("body", "")
+        category = classify_result(exc.status, body)
+        from .classifier import _is_cloudflare_challenge
+
+        is_cf = category == ResultCategory.FORBIDDEN and _is_cloudflare_challenge(body)
         return ReverseResult(
             category=category,
             status_code=exc.status,
-            body=exc.details.get("body", ""),
+            body=body,
             error=str(exc),
+            is_cloudflare=is_cf,
         )
     except Exception as exc:
         logger.error(
